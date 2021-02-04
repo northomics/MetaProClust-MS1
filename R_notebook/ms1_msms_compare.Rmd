@@ -1,0 +1,218 @@
+---
+title: "Comparing MS1 and MS/MS output"
+output: html_notebook
+---
+
+To compare the clusters identified using MS1 and MS/MS level data, let's first load required libraries and data.
+
+```{r, message=F, error=F}
+#library(renv) #remotes::install_github("rstudio/renv")
+#renv::restore()
+library(tidyverse)
+library(here)
+library(ggdendro)
+library(cluster)
+library(dendextend)
+#renv::snapshot()
+load(here::here("data", "ms1", "ms1_dedro.RData"))                             
+load(here::here("data", "msms", "msms_dedro.RData"))   
+```
+
+We need to choose the ultimate number of clusters using **silhouette scores** so that we can compare MS1 vs MS/MS and PCA vs SVD.
+
+```{r}
+mydist <- function(x) as.dist(1-cor(x, method="pearson")) 
+mycluster_hclust <- function(x, k) list(cluster=cutree(hclust(mydist(x), method = "average"),k=k))
+
+#ms1_clust <- ms1_drugclust %>% as.dendrogram() %>% cutree(., h=1)
+#ms2_clust <- ms2_drugclust %>% as.dendrogram() %>% cutree(., h=1)
+
+## Function for quick silhouette score calculation
+
+quick_sil <- function(hclust_out, distance, max_k){
+  silhouette_score <- function(i){
+    k=cutree(hclust_out,i)
+    ss <- silhouette(k, 1-cor(distance, method="pearson"))
+    mean(ss[, 3])
+    }
+  clustnum <- 2:max_k
+  avg_sil <- sapply(clustnum, silhouette_score)
+  avg_sil <- data.frame(num = clustnum, sil_score = avg_sil)
+  avg_sil <- rbind(c(1,0), avg_sil)
+  return(avg_sil)
+}
+
+## MS1
+# PCA
+ms1_pca_sil <- quick_sil(hclust_out=ms1_drugclust_pca, distance = 1-cor(ms1_moduleTraitCor_pca, method="pearson"), max_k = 7) 
+(ms1_sil <- ggplot(ms1_pca_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("MS1 - PCA")
+)
+
+##MS1
+# SVD
+ms1_svd_sil <- quick_sil(hclust_out=ms1_drugclust_svd, distance = 1-cor(ms1_moduleTraitCor_svd, method="pearson"), max_k = 7) 
+(ms1_sil <- ggplot(ms1_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("MS1 - SVD")
+)
+
+## ms2
+# PCA
+ms2_pca_sil <- quick_sil(hclust_out=msms_drugclust_pca, distance = 1-cor(msms_moduleTraitCor_pca, method="pearson"), max_k = 7) 
+(ms2_sil <- ggplot(ms2_pca_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=5, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("MS/MS - PCA")
+)
+#
+##ms2
+# SVD
+ms2_svd_sil <- quick_sil(hclust_out=msms_drugclust_svd, distance = 1-cor(msms_moduleTraitCor_svd, method="pearson"), max_k = 7) 
+(ms2_sil <- ggplot(ms2_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=3, alpha=0.4) +
+    geom_vline(xintercept=3, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("MS/MS - SVD")
+)
+
+
+```
+## PCA 
+
+```{r}
+clust_cols_ms1_pca <- c("#3444DA", "#DF737A")
+clust_cols_ms2_pca <- c("#DF737A", "#3444DA", "#59C9A5","#FFE66D", "#2E1F27")
+
+## ms1 optimal clust num = 2
+ms1_pca <- ms1_drugclust_pca %>% as.dendrogram() %>% color_branches(k=2, col=clust_cols_ms1_pca) %>%
+    dendextend::set("branches_lwd", 3) 
+## ms2 optimal clust num = 3
+ms2_pca <- msms_drugclust_pca %>% as.dendrogram() %>% color_branches(k=5, col=clust_cols_ms2_pca) %>%
+    dendextend::set("branches_lwd", 3)  
+    
+
+compare_ms1ms2_pca <- dendlist(ms1_pca, ms2_pca) %>% untangle(method = "step2side")
+compare_ms1ms2_pca %>% entanglement()
+
+
+#pdf(here::here("figs", "ms1_ms2_tanglegram_pca.pdf"), width=6, height=5)
+tanglegram(compare_ms1ms2_pca, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main="PCA", main_left="MS1", main_right="MS/MS")
+#dev.off()
+
+```
+
+## SVD 
+
+```{r}
+clust_cols_ms1_svd <- c("#3444DA", "#DF737A")
+clust_cols_ms2_svd <- c("#DF737A", "#3444DA", "#59C9A5")
+
+## ms1 optimal clust num = 2
+ms1_svd <- ms1_drugclust_svd %>% as.dendrogram() %>% color_branches(k=2, col=clust_cols_ms1_svd) %>%
+    dendextend::set("branches_lwd", 3) 
+## ms2 optimal clust num = 3
+ms2_svd <- msms_drugclust_svd %>% as.dendrogram() %>% color_branches(k=3, col=clust_cols_ms2_svd) %>%
+    dendextend::set("branches_lwd", 3)  
+
+compare_ms1ms2_svd <- dendlist(ms1_svd, ms2_svd) %>% untangle(method = "step2side")
+
+compare_ms1ms2_svd  %>% entanglement()
+
+#pdf(here::here("figs", "ms1_ms2_svd_tanglegram.pdf"), width=6, height=5)
+tanglegram(compare_ms1ms2_svd , sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main = "SVD", main_left="MS1", main_right="MS/MS")
+#dev.off()
+
+```
+
+Statistical tests to compare the two dendrograms. 
+Here is the cophenetic correlation coefficient and permutation test p-value:
+
+```{r}
+## "The value can range between -1 to 1. With near 0 values meaning that the two trees are not statistically similar. For exact p-value one should result to a permutation test. One such option will be to permute over the labels of one tree many times, and calculating the distribution under the null hypothesis (keeping the trees topologies constant)." 
+## Null hypothesis is correlation = 0 
+## two tailed:  H1  cor != 0
+## one tailed: H1 cor > 0 OR H1 cor < 0
+factorial(15) # this is the top number of permutations...still quite a lot 
+
+cor_coph <- cor_cophenetic(ms1_svd, ms2_svd)
+set.seed(2248)
+R <- 2000
+cor_coph_results <- numeric(R)
+dend_mixed <- ms2_svd
+for (i in 1:R){
+  dend_mixed <- sample.dendrogram(dend_mixed, replace = F) #just swapping labels for a permutation p-value
+  cor_coph_results[i] <- cor_cophenetic(ms1_svd, dend_mixed)
+}
+
+mean(abs(cor_coph_results)>=cor_coph)
+
+cor_coph_results <- cor_coph_results %>% as.data.frame()
+
+
+
+(cor_coph_plot <-  ggplot(cor_coph_results, aes(x=.)) +
+    geom_density(fill = "#59c9a5", colour = "#59c9a5", alpha = 0.8) +
+    geom_vline(xintercept=1, size = 1.2, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=0, size = 1.2, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=cor_coph, size=1.2, colour="#df737a") +
+    annotate("text", x=0.3, y=4, label= "r = 0.625") +
+    ylab("Density") +
+    xlab("Cophenetic correlation coefficent") + 
+    theme_bw())
+#ggsave(file="../../docFigs/cophcorboot.pdf", width=6, height=4, units="in")
+```
+
+
+
+
+## Comparing PCA vs SVD within the same MS-level
+
+``` {r}
+compare <- dendlist(ms1_svd, ms1_pca) %>% untangle(method = "step2side")
+#compare_ran <- dendlist(ms1, ms2) %>% untangle(method = "random", R=35)
+compare %>% entanglement()
+#compare_ran %>% entanglement
+#tanglegram(dl, sort = F, common_subtrees_color_lines = FALSE, highlight_distinct_edges  = FALSE, highlight_branches_lwd = FALSE)
+
+#pdf(here::here("output","figs", "ms1_ms2_tanglegram.pdf"), width=6, height=5)
+tanglegram(compare, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main = "MS1", main_left = "SVD", main_right = "PCA")
+
+
+compare <- dendlist(ms2_svd, ms2_pca) %>% untangle(method = "step2side")
+#compare_ran <- dendlist(ms1, ms2) %>% untangle(method = "random", R=35)
+compare %>% entanglement()
+#compare_ran %>% entanglement
+#tanglegram(dl, sort = F, common_subtrees_color_lines = FALSE, highlight_distinct_edges  = FALSE, highlight_branches_lwd = FALSE)
+
+#pdf(here::here("output","figs", "ms1_ms2_tanglegram.pdf"), width=6, height=5)
+tanglegram(compare, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main = "MS/MS", main_left = "SVD", main_right = "PCA")
+
+
+```
