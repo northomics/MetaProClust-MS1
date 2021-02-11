@@ -128,7 +128,7 @@ tanglegram(compare_ms1ms2_pca, sort=F, common_subtrees_color_lines=F,highlight_b
 ## SVD 
 
 ```{r}
-clust_cols_ms1_svd <- c("#3444DA", "#DF737A")
+clust_cols_ms1_svd <- c("#DF737A", "#3444DA")
 clust_cols_ms2_svd <- c("#DF737A", "#3444DA", "#59C9A5")
 
 ## ms1 optimal clust num = 2
@@ -142,9 +142,9 @@ compare_ms1ms2_svd <- dendlist(ms1_svd, ms2_svd) %>% untangle(method = "step2sid
 
 compare_ms1ms2_svd  %>% entanglement()
 
-#pdf(here::here("figs", "ms1_ms2_svd_tanglegram.pdf"), width=6, height=5)
+#pdf(here::here("..", "docFigs", "ms1_ms2_svd_tanglegram.pdf"), width=6, height=5)
 tanglegram(compare_ms1ms2_svd , sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
-           highlight_distinct_edges=F, main = "SVD", main_left="MS1", main_right="MS/MS")
+           highlight_distinct_edges=F,main="SVD", main_left="MS1-only", main_right="MS/MS")
 #dev.off()
 
 ```

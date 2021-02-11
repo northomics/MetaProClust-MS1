@@ -394,7 +394,7 @@ drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
 #dev.off()
 
 ## colours for dendrogram branches
-clust_cols_ms1_svd <- c("#3444DA", "#DF737A")
+clust_cols_ms1_svd <- c("#DF737A", "#3444DA")
 ## colours for heatmap
 new_palette <- colorRampPalette(c("#70A9A1", "white", "#FF9633"))(n=120)
 
