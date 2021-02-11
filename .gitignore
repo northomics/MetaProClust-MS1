@@ -2,6 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+*.Rproj
 
 ms1_openms_int.txt
 *.DS_Store
