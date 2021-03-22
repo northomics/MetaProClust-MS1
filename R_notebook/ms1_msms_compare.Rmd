@@ -161,7 +161,7 @@ factorial(15) # this is the top number of permutations...still quite a lot
 
 cor_coph <- cor_cophenetic(ms1_svd, ms2_svd)
 set.seed(2248)
-R <- 2000
+R <- 10000
 cor_coph_results <- numeric(R)
 dend_mixed <- ms2_svd
 for (i in 1:R){
@@ -170,7 +170,7 @@ for (i in 1:R){
 }
 
 mean(abs(cor_coph_results)>=cor_coph)
-
+sum(abs(cor_coph_results)>=cor_coph)
 cor_coph_results <- cor_coph_results %>% as.data.frame()
 
 
@@ -184,7 +184,7 @@ cor_coph_results <- cor_coph_results %>% as.data.frame()
     ylab("Density") +
     xlab("Cophenetic correlation coefficent") + 
     theme_bw())
-#ggsave(file="../../docFigs/cophcorboot.pdf", width=6, height=4, units="in")
+ggsave(file="../../docFigs/cophcorboot.pdf", width=6, height=4, units="in")
 ```
 
 
