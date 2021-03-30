@@ -38,8 +38,7 @@ Let's input our MS1 feature intensity file and our metadata file that has inform
 
 *Note: The OpemMS output files were subset to only include the intensity values due to file size limitations*
 
-```{r}                                                                                                                                                                                                   
-
+```{r}                                                                                              
 intensity <- read.csv(here::here("data", "ms1", "ms1_intensity.csv"), row.names=1)
 metadata <- read.csv(here::here("data", "meta_data.csv")) %>%
     mutate(plate_cell = paste0("P2", Cell))
@@ -167,7 +166,6 @@ quick_pca <- function(coords_df, x_PC, y_PC, shape, fill){
     xaxis <- x_PC
     yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
     xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
-    
     yaxislabel <- paste0("PC", yaxis, " ", yperc)
     xaxislabel <- paste0("PC", xaxis, " ", xperc)
     pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
@@ -182,6 +180,8 @@ quick_pca <- function(coords_df, x_PC, y_PC, shape, fill){
 (pc12 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 1, shape = "Concentration", fill = "Drug"))
 
 (pc23 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Concentration", fill = "Drug"))
+
+ggsave(filename = "../figs/ms2-pc12-full.pdf", pc12, width = 8, height = 6, units = "in")
 ```
 
 ## Calculating log2 fold change 
@@ -201,6 +201,71 @@ fc <- ctrl - drug_temp
 noctrlmeta <- meta_drug  %>% filter(Drug != "NC") 
 fc <- fc %>% dplyr::select(noctrlmeta$Name)
 #write.csv(fc, here::here("data","ms1", "ms1_fc.csv"), quote=F, row.names = T)
+
+## FC PCA that is in manuscript
+pca<- prcomp(fc %>% t(), center=T, scale=F)
+sampleVals<-data.frame(pca$x)
+exprVals<-data.frame(pca$rotation)
+PoV <- (pca$sdev^2/sum(pca$sdev^2))*100 
+
+coords<-data.frame(sampleVals, Drug = noctrlmeta$Drug,
+                   samplename = rownames(sampleVals),
+                   Concentration = noctrlmeta$Conc)
+coords$Concentration <- factor(coords$Concentration, levels = c("H", "M", "L"))
+numPCs <- 1:length(PoV)
+
+for (i in 1:length(PoV)) {
+    percent <- paste0("(", round(PoV[i],2), "%)")
+    name <- paste0("PC", i, "per")
+    assign(name, percent)
+}
+
+## easy and quick PCA function for manual colour and shape
+quick_pca <- function(coords_df, x_PC, y_PC, shape, fill){
+    yaxis <- y_PC
+    xaxis <- x_PC
+    yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
+    xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
+    yaxislabel <- paste0("PC", yaxis, " ", yperc)
+    xaxislabel <- paste0("PC", xaxis, " ", xperc)
+    pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
+        geom_point(size=4, aes_string(shape = shape, color = fill)) + 
+        scale_color_manual(values=c("#3444DA",  "#DF737A", "#8C5999", "#D7C0D0", "#FFBA49")) +
+        scale_shape_manual(values=c(19,17,15,18,3)) +
+        scale_x_continuous(name=xaxislabel) + 
+        scale_y_continuous(name=yaxislabel) +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16))
+    return(pca_plot)
+}
+
+quick_pca_newcol <- function(coords_df, x_PC, y_PC, shape, fill){
+    yaxis <- y_PC
+    xaxis <- x_PC
+    yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
+    xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
+    yaxislabel <- paste0("PC", yaxis, " ", yperc)
+    xaxislabel <- paste0("PC", xaxis, " ", xperc)
+    pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
+        geom_point(size=4, aes_string(shape = shape, color = fill)) + 
+        scale_color_manual(values=c("#FFA400",  "#C43171", "#3444DA")) +
+        scale_shape_manual(values=c(19,17,15,18,3)) +
+        scale_x_continuous(name=xaxislabel) + 
+        scale_y_continuous(name=yaxislabel) +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16))
+    return(pca_plot)
+}
+
+(pc12 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 1, shape = "Concentration", fill = "Drug"))
+
+
+(pc23 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Concentration", fill = "Drug"))
+
+(pc23conc <- quick_pca_newcol(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Drug", fill = "Concentration"))
+
+ggsave(filename = "../../docFigs/ms1_pc23_conc.pdf", pc23conc, height = 6, width = 8, units ="in")
+
 ```
 
 
@@ -338,7 +403,7 @@ heatmap.2(moduleTraitCor_pca,
           #ColSideColors = cor_meta$drug_col,
           ColSideColors = cor_meta_pca$drug_col,
           labRow = "",
-          key.xlab ="Correlation",
+          key.xlab ="Pearson's Correlation Coefficient",
           key.title = NA,
           lhei = c(1,4),
           lwid= c(1,3),
@@ -347,7 +412,7 @@ heatmap.2(moduleTraitCor_pca,
 legend(coords2, title = "Drug",legend=c("AZ","CP", "DC", "NZ", "PR"), 
        fill=c("#3444DA",  "#DF737A", "#8C5999", "#D7C0D0", "#FFBA49"), cex=0.8, box.lty=0)
 # Uncomment if you are saving to file
-#ev.off()
+#dev.off()
 ```
 
 Now, let's look at *SVD-derived* eigenfeatures (this is the more common way of calculating an eigenfeature).
@@ -415,7 +480,7 @@ drug_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 2, col = clust_co
 
 
 ## Uncomment to save PDF of heatmap
-#pdf(here::here("figs", "ms1_kmed_hm_svd.pdf"), width=9, height=6)
+#pdf(here::here("..","docFigs", "ms1_kmed_hm_svd.pdf"), width=9, height=6)
 par(xpd = TRUE) # allows legend to be outside "official" plotting lines
 coords2 <- list(x=0, y=0.95)
 heatmap.2(moduleTraitCor_svd,
