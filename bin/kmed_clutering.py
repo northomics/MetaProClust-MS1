@@ -65,7 +65,7 @@ usage = "usage: %prog [options] -s s_mat.csv -n nthreads -k n -d directory/"
 parser = argparse.ArgumentParser(description="Peptide/feature clusters from pre-computed ICA decomposition")
 parser.add_argument("-s", "--s_mat", dest="s_mat", required=True, metavar="S.csv", help="S matrix ICA output")
 parser.add_argument("-d", "--dir", dest="dir", required=True, metavar="directory/", help="directory for your output files")
-parser.add_argument("-k", "--k", desk="k_choice", required=False, metavar="k", help="Directly cluster using pre-determined k choice")
+parser.add_argument("-k", "--k", dest="k_choice", required=False, metavar="k", help="Directly cluster using pre-determined k choice")
 parser.add_argument("-n", "--threads", dest="n_threads", default=1, metavar="nthreads/", help="number of threads to use")
 args = parser.parse_args()
 
