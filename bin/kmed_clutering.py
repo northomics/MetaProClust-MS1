@@ -94,8 +94,8 @@ k_list = list(range(2, 50))
 
 ## Ignore computed best_k_med if user supplies k
 if args.k_choice is not None:
-    best_k_med = args.k_choice
-    print("Completing k-medoids using k=" + best_k_med)
+    best_k_med = int(args.k_choice)
+    print("Completing k-medoids using k=", str(best_k_med))
 else:
     print("Searching for best k using maximum silhouette score.")
     best_k_med, kmed_sil_list, kmed_inert  = compare_k_med(k_list, mixing_cor)
@@ -105,6 +105,7 @@ kmed_clust_labels = kmedoids_S.labels_
 
 ## save these asap so we can start working on this asap
 np.savetxt(kmed_labels, kmed_clust_labels.astype(int), delimiter=',', fmt='%i')
-np.savetxt(sil_kmed, kmed_sil_list, delimiter=',', fmt='%f')
-np.savetxt(inertia_kmed, kmed_inert, delimiter=',', fmt='%f')
+if args.k_choice is None:
+    np.savetxt(sil_kmed, kmed_sil_list, delimiter=',', fmt='%f')
+    np.savetxt(inertia_kmed, kmed_inert, delimiter=',', fmt='%f')
 
