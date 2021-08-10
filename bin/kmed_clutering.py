@@ -60,11 +60,12 @@ def compare_k_med(k_list, X):
 ### SET UP CMND LINE OPTIONS FOR FILE IN/OUTPUT ###
 ####################################################
 
-usage = "usage: %prog [options] -s s_mat.csv -d directory/"
+usage = "usage: %prog [options] -s s_mat.csv -k n -d directory/"
 
 parser = argparse.ArgumentParser(description="Peptide/feature clusters from pre-computed ICA decomposition")
 parser.add_argument("-s", "--s_mat", dest="s_mat", required=True, metavar="S.csv", help="S matrix ICA output")
 parser.add_argument("-d", "--dir", dest="dir", required=True, metavar="directory/", help="directory for your output files")
+parser.add_argument("-k", "--k", desk="k_choice", required=False, metavar="k", help="Directly cluster using pre-determined k choice")
 args = parser.parse_args()
 
 
@@ -78,27 +79,12 @@ s_mat = args.s_mat
 output_dir = os.path.dirname(args.dir)
 print(output_dir)
 ## data output files
-#aggclust_labels = os.path.join(output_dir+"aggclust_labels_pep.csv")
+
 kmed_labels = os.path.join(output_dir + "/k-med_labels.csv")
 print(kmed_labels)
 sil_kmed = os.path.join(output_dir + "/k-med_silhouette.csv")
-#sil_aggclust = os.path.join(output_dir+"../output/aggclust_silhouette_pep.csv")
 inertia_kmed = os.path.join(output_dir + "/k-med_inertia.csv")
-#mixing_cor_file = "../output/mixing_cor_matrix.csv"
 
-## import the normalized and transformed ms1 features
-#log_features = pd.read_csv(log_features_file, header = 0)
-
-### ICA
-# https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.FastICA.html
-# https://stackoverflow.com/questions/35407669/independent-component-analysis-ica-in-python
-# using the number of components that explained 99% of the variance using PCA
-## following Sastry2019a
-#ica = FastICA(random_state=2248, n_components=213, whiten=True, algorithm='parallel',  tol=10e-8)
-
-# Compute ICA...already computed//
-#S_ = ica.fit_transform(log_features)  # Reconstruct signals
-#A_ = ica.mixing_  # Get estimated mixing matrix
 
 S_ = pd.read_csv(s_mat, header=0, index_col=0)
 #A_ = pd.read_csv(a_mat, header=0)
@@ -110,7 +96,14 @@ mixing_cor = pairwise_distances(S_, Y=None, metric='correlation', n_jobs=10) ## 
 ## see which k has best silhouette score
 k_list = list(range(2, 50))
 
-best_k_med, kmed_sil_list, kmed_inert  = compare_k_med(k_list, mixing_cor)
+## Ignore computed best_k_med if user supplies k
+if args.k_choice is not None:
+    best_k_med = args.k_choice
+    print("Completing k-medoids using k=" + best_k_med)
+else:
+    print("Searching for best k using maximum silhouette score.")
+    best_k_med, kmed_sil_list, kmed_inert  = compare_k_med(k_list, mixing_cor)
+
 kmedoids_S = KMedoids(n_clusters=best_k_med, metric='precomputed', random_state=2248, init='k-medoids++').fit(mixing_cor)
 kmed_clust_labels = kmedoids_S.labels_
 
