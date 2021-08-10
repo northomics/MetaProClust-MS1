@@ -22,7 +22,7 @@ def compare_k_AggClustering(k_list, X):
     # Run clustering with different k and check the metrics
     silhouette_list = []
     for p in k_list:
-        print("Calculating silhouette score for k=", p)
+        print("Calculating silhouette score for k =", p)
         clusters = AgglomerativeClustering(n_clusters=p, affinity='precomputed', linkage='average', distance_threshold=None)
         clusters.fit(X)
         # The higher (up to 1) the better
@@ -31,7 +31,7 @@ def compare_k_AggClustering(k_list, X):
     # The higher (up to 1) the better
     key = silhouette_list.index(max(silhouette_list))
     k = k_list.__getitem__(key)
-    print("AggClust best silhouette =", max(silhouette_list), " for k=", k)
+    print("AggClust best silhouette =", max(silhouette_list), " for k =", k)
     return k, silhouette_list
 
 
@@ -41,8 +41,7 @@ def compare_k_med(k_list, X):
     silhouette_list = []
     inertia_list = []
     for p in k_list:
-        print("Calculating silhouette score for k=", p)
-        #clusters = AgglomerativeClustering(n_clusters=p, affinity='precomputed', linkage='average', distance_threshold=None)
+        print("Calculating silhouette score for k =", p)
         clusters = KMedoids(n_clusters=p, metric='precomputed', random_state=2248, init='k-medoids++')
         clusters.fit(X)
         # The higher (up to 1) the better
@@ -53,44 +52,41 @@ def compare_k_med(k_list, X):
     # The higher (up to 1) the better
     key = silhouette_list.index(max(silhouette_list))
     k = k_list.__getitem__(key)
-    print("Kmed best silhouette =", max(silhouette_list), " for k=", k)
+    print("Kmed best silhouette =", max(silhouette_list), " for k =", k)
     return k, silhouette_list, inertia_list
 
 ####################################################
 ### SET UP CMND LINE OPTIONS FOR FILE IN/OUTPUT ###
 ####################################################
 
-usage = "usage: %prog [options] -s s_mat.csv -k n -d directory/"
+usage = "usage: %prog [options] -s s_mat.csv -n nthreads -k n -d directory/"
+
 
 parser = argparse.ArgumentParser(description="Peptide/feature clusters from pre-computed ICA decomposition")
 parser.add_argument("-s", "--s_mat", dest="s_mat", required=True, metavar="S.csv", help="S matrix ICA output")
 parser.add_argument("-d", "--dir", dest="dir", required=True, metavar="directory/", help="directory for your output files")
 parser.add_argument("-k", "--k", desk="k_choice", required=False, metavar="k", help="Directly cluster using pre-determined k choice")
+parser.add_argument("-n", "--threads", dest="n_threads", default=1, metavar="nthreads/", help="number of threads to use")
 args = parser.parse_args()
 
 
 
 ## data input files
-#s_mat =  "../output/S.csv"
 s_mat = args.s_mat
-#a_mat = "../output/A.csv"
-
-
 output_dir = os.path.dirname(args.dir)
-print(output_dir)
-## data output files
 
+## data output files
 kmed_labels = os.path.join(output_dir + "/k-med_labels.csv")
-print(kmed_labels)
 sil_kmed = os.path.join(output_dir + "/k-med_silhouette.csv")
 inertia_kmed = os.path.join(output_dir + "/k-med_inertia.csv")
-
 
 S_ = pd.read_csv(s_mat, header=0, index_col=0)
 #A_ = pd.read_csv(a_mat, header=0)
 
+nthreads = int(args.n_threads)
+
 ## Compute distance matrix for mixing 
-mixing_cor = pairwise_distances(S_, Y=None, metric='correlation', n_jobs=10) ##  increase the njobs if run on beter server
+mixing_cor = pairwise_distances(S_, Y=None, metric='correlation', n_jobs=nthreads) ##  increase the njobs if run on beter server
 
 ## Trying Kmedoids
 ## see which k has best silhouette score
