@@ -1,0 +1,509 @@
+---
+title: "MS/MS clustering"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+Clustering MS/MS data requires some quality control that can be done in R.
+
+In addition, we will need to use a `bash` script that calls multiple Python scripts. 
+All scripts are available in `bin/`. 
+This notebook explains how the data from the manuscript was clustered.
+
+First, let's load all required R libraries. We included an `renv` lockfile that describes the package versions we used for this manuscript.
+
+```{r, message=F, error=F}
+library(renv) #remotes::install_github("rstudio/renv")
+renv::restore()
+library(tidyverse)
+library(stringr)
+library(DESeq2)
+library(data.table)
+library(dendextend)
+library(here)
+library(impute)
+library(pvclust)
+library(gplots)
+library(RColorBrewer)
+library(cluster)
+#renv::snapshot()
+
+```
+
+
+
+## Data input and normalization
+
+Let's input our MS/MS peptide intensity file and our metadata file that has information on the microbiome treatments.
+
+*Note: The peptide intensity file has been subset from the MaxQuant output to only include peptide sequence and intensity information* 
+
+```{r}
+peptide_intensity <- here::here("data","msms", "ms2_intensity.csv")
+intensity <- read.csv(peptide_intensity, row.names = 1)
+peptides <- rownames(intensity)
+metadata <- read.csv(here::here("data", "meta_data.csv"), row.names=1) %>% arrange(., Drug)
+intensity <- intensity %>% dplyr::select(metadata$V1)
+colnames(intensity) <- metadata$Name
+```
+
+We now filter the intensity data to remove rows with too many missing values. We want to ensure that at least 50% of at least one drug treatment is without missing data. We should also normalize the intensity values by the depth of peptide identification. 
+
+```{r}
+# to get the number of samples per treatment
+cond_options_x <- table(metadata$Drug) %>% as.data.frame()
+# drug treatments
+cond_opts <- cond_options_x$Var1
+# number of samples per treatment we are checking for 
+cond_count <- cond_options_x$Freq * 0.5
+
+is.nan.data.frame <- function(x){
+    do.call(cbind, lapply(x, is.nan))}
+## Data filtering function
+## https://datascienceplus.com/proteomics-data-analysis-2-3-data-filtering-and-missing-value-imputation/
+filter_valids = function(df, conditions, min_count, at_least_one = TRUE) {
+    # df = data frame containing LOG2 data for filtering and organized by data type
+    # conditions = a character vector dictating the grouping
+    # min_count = a numeric vector of the same length as "conditions" indicating the minimum 
+    #     number of valid values for each condition for retention
+    # at_least_one = TRUE means to keep the row if min_count is met for at least one condition
+    #     FALSE means min_count must be met across all conditions for retention
+    #df[df==0] <- NA
+    df[is.nan.data.frame(df)] <- 0
+    all_names <- colnames(df) 
+    cond.names = lapply(conditions, # Group column names by conditions
+                        function(x) grep(x, all_names, value = TRUE, perl = TRUE))
+    cond.filter = sapply(1:length(cond.names), function(i) {
+        df2 = df %>% dplyr::select(cond.names[[i]])   # Extract columns of interest
+        df2 = as.matrix(df2)   # Cast as matrix for the following command
+        sums = rowSums(df2!=0) # count the number of valid values for each condition
+        sums >= min_count[i]   # Calculates whether min_count requirement is met
+    })
+    if (at_least_one) {
+        df$KEEP = apply(cond.filter, 1, any)
+    } else {
+        df$KEEP = apply(cond.filter, 1, all)
+    }
+    #return(df) # No rows are omitted, filter rules are listed in the KEEP column
+    
+    return(df)  # only keeping rows that meet the criteria!
+}
+
+## filter by at least Q50 in the treatments
+int_filt <- filter_valids(intensity, 
+                          conditions = cond_opts,
+                          min_count = cond_count, 
+                          at_least_one = T)  
+int_filt <- intensity[int_filt $KEEP == 1,] 
+filt_peptides <- rownames(int_filt)
+
+## Normalize by number of  size
+norm_pep <- estimateSizeFactorsForMatrix(int_filt)
+norm_exp <- sweep(int_filt, 2, norm_pep, "/") ##peptides are normalized
+```
+
+## Missing data imputation
+
+Although we filtered data, we are still left with missing values that will cause challenges with log transformation and fold change calculations. We used a KNN data imputation.
+
+```{r, message=F, warning=F}
+## impute missing values
+norm_exp[norm_exp== 0] <- NA
+imputed_pep<- impute.knn(norm_exp %>% as.matrix(), k = 10, rowmax = 0.5, colmax = 0.95, rng.seed = 362436069)
+```
+
+## Log2 intensity transformation and PCA quality check
+
+```{r, message=F, warning=F}
+log_exp <- data.frame(imputed_pep$data) %>%
+    mutate_all(., funs(log2(1 + .)))
+colnames(log_exp) = colnames(imputed_pep$data)
+rownames(log_exp) <- filt_peptides
+rownames(imputed_pep$data) <- filt_peptides
+pca<- prcomp(log_exp %>% t(), center=T, scale=F)
+sampleVals<-data.frame(pca$x)
+exprVals<-data.frame(pca$rotation)
+PoV <- (pca$sdev^2/sum(pca$sdev^2))*100 
+
+coords<-data.frame(sampleVals, Drug = metadata$Drug,
+                   samplename = rownames(sampleVals),
+                   Concentration = metadata$Conc)
+coords$Concentration <- factor(coords$Concentration, levels = c("H", "M", "L", "1D"))
+numPCs <- 1:length(PoV)
+
+for (i in 1:length(PoV)) {
+    percent <- paste0("(", round(PoV[i],2), "%)")
+    name <- paste0("PC", i, "per")
+    assign(name, percent)
+}
+
+## easy and quick PCA function for manual colour and shape
+quick_pca <- function(coords_df, x_PC, y_PC, shape, fill){
+    yaxis <- y_PC
+    xaxis <- x_PC
+    yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
+    xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
+    
+    yaxislabel <- paste0("PC", yaxis, " ", yperc)
+    xaxislabel <- paste0("PC", xaxis, " ", xperc)
+    pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
+        geom_point(size=4, aes_string(shape = shape, color = fill)) + 
+        scale_color_manual(values=c("#3444DA",  "#DF737A", "#8C5999", "#00916E", "#D7C0D0", "#FFBA49")) +
+        scale_x_continuous(name=xaxislabel) + 
+        scale_y_continuous(name=yaxislabel) +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16))
+    return(pca_plot)
+}
+(pc12 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 1, shape = "Concentration", fill = "Drug"))
+
+(pc23 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Concentration", fill = "Drug"))
+```
+
+## Calculating log2 fold change 
+
+We are using [precise-db's](https://github.com/SBRG/precise-db) implementation of robust components in ICA matrix decomposition. This implementation required fold change values. 
+
+We need to write this log2 FC to a file because the ICA implementation is written in Python. 
+
+```{r}
+ctrl <- dplyr::select(log_exp, contains("NC"))
+ctrl$median = apply(ctrl, 1, median, na.rm = T)
+drug_temp <- dplyr::select(log_exp, -contains("NC"))
+ctrl<- matrix(ctrl$median, nrow=length(ctrl$median), ncol=ncol(drug_temp), byrow=F)
+
+fc <- ctrl - drug_temp
+
+noctrlmeta <- metadata  %>% filter(Drug != "NC") 
+fc <- fc %>% dplyr::select(noctrlmeta$Name)
+#write.csv(fc, here::here("data","msms", "ms2_fc.csv"), quote=F, row.names = T)
+
+## FC PCA that is in manuscript
+pca<- prcomp(fc %>% t(), center=T, scale=F)
+sampleVals<-data.frame(pca$x)
+exprVals<-data.frame(pca$rotation)
+PoV <- (pca$sdev^2/sum(pca$sdev^2))*100 
+
+coords<-data.frame(sampleVals, Drug = noctrlmeta$Drug,
+                   samplename = rownames(sampleVals),
+                   Concentration = noctrlmeta$Conc)
+coords$Concentration <- factor(coords$Concentration, levels = c("H", "M", "L"))
+numPCs <- 1:length(PoV)
+
+for (i in 1:length(PoV)) {
+    percent <- paste0("(", round(PoV[i],2), "%)")
+    name <- paste0("PC", i, "per")
+    assign(name, percent)
+}
+
+## easy and quick PCA function for manual colour and shape
+quick_pca <- function(coords_df, x_PC, y_PC, shape, fill){
+    yaxis <- y_PC
+    xaxis <- x_PC
+    yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
+    xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
+    yaxislabel <- paste0("PC", yaxis, " ", yperc)
+    xaxislabel <- paste0("PC", xaxis, " ", xperc)
+    pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
+        geom_point(size=4, aes_string(shape = shape, color = fill)) + 
+        scale_color_manual(values=c("#3444DA",  "#DF737A", "#8C5999", "#D7C0D0", "#FFBA49")) +
+        scale_shape_manual(values=c(19,17,15,18,3)) +
+        scale_x_continuous(name=xaxislabel) + 
+        scale_y_continuous(name=yaxislabel) +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16))
+    return(pca_plot)
+}
+
+quick_pca_newcol <- function(coords_df, x_PC, y_PC, shape, fill){
+    yaxis <- y_PC
+    xaxis <- x_PC
+    yperc <- paste0("(", round(PoV[yaxis %>% as.numeric()] ,2), "%)")
+    xperc <- paste0("(", round(PoV[xaxis %>% as.numeric()] ,2), "%)")
+    yaxislabel <- paste0("PC", yaxis, " ", yperc)
+    xaxislabel <- paste0("PC", xaxis, " ", xperc)
+    pca_plot <- ggplot(coords, aes_string(x = paste0('PC', xaxis), y = paste0('PC', yaxis))) +
+        geom_point(size=4, aes_string(shape = shape, color = fill)) + 
+        scale_color_manual(values=c("#FFA400",  "#C43171", "#3444DA")) +
+        scale_shape_manual(values=c(19,17,15,18,3)) +
+        scale_x_continuous(name=xaxislabel) + 
+        scale_y_continuous(name=yaxislabel) +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16))
+    return(pca_plot)
+}
+
+(pc12 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 1, shape = "Concentration", fill = "Drug"))
+
+
+(pc23 <- quick_pca(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Concentration", fill = "Drug"))
+
+(pc23conc <- quick_pca_newcol(coords_df = coords, x_PC = 2, y_PC = 3, shape = "Drug", fill = "Concentration"))
+#ggsave(filename = "../../docFigs/ms2pc23_conc.pdf", pc23conc, width = 8, height=6, units = "in")
+```
+
+
+
+## Clustering
+
+Clustering can be completed the following scripts provided in `bin/`. The ICA implementation of precise-db requires a conda environment which can be accessed using `conda activate precise-db`.
+
+Once ICA has completed it's run, you will find `S.csv` (and other relevent files) in your chosen output directory. We will be clustering this matrix using `kmed_clustering.py` This script was written considering the newest versions of used packages, thus, `kmed_clustering.py` also has it's own `conda` environment named `k-med`. 
+
+The following should be run in your terminal and requires `conda` and `python`.
+
+```{zsh engine.opts='-i', eval=F}
+## THIS IS A SHELL SCRIPT
+## It is best to run this in it's own terminal window because of RStudio's memory limitations 
+cd ./bin
+# You will need to create a specific conda environment for ICA. 
+# Uncomment the code below to create the environment
+# conda env create -f environment.yml
+conda activate precise-db
+## script for robust ICA matrix decomposition
+## Update -n to as many threads you have available; ideally at least 6 
+## However this will run on a laptop with fewer cores, it just may take longer 
+sh run_ica.sh -i 100 -t 1e-8 -n 6 -o ../../data/msms/ -l ../../data/msms/ica.log ../../data/msms/ms2_fc.csv
+conda deactivate 
+
+# to create the correct conda environment for clustering
+#conda env create -f k-med_env.yml
+# This k-medoid clustering relies on newer modules than the ica implementation 
+conda activate k-med 
+./kmed_clutering.py -s ../data/msms/S.csv -d ../data/msms/
+conda deactivate 
+
+```
+
+## Cluster eigenfeature calculation and clustering visualization
+
+After we use `Python` for clustering our relatively large dataset, let's calculate summary statistics of each peptide cluster considering the peptide intensity values.
+
+```{r message=F, warning=F}
+#sil <- read.csv(here::here("data", "msms", "k-med_silhouette.csv"), header=F)
+#inertia <- read.csv(here::here("data", "msms", "k-med_inertia.csv"), header=F)
+kmedoid_labels <- read.csv(here::here("data", "msms", "k-med_labels.csv"), header=F) %>% as.vector()
+
+clusterinfopep <- kmedoid_labels %>% data.frame()
+
+max_clust <- kmedoid_labels %>% unique() %>% max()
+fc_clusters <- list()
+print(paste("Number of clusters:", max_clust))
+## creating a list that contains intensities of each peptide cluster
+for (x in 0:max_clust){
+    clustername <- paste("Cluster", x)
+    y <- kmedoid_labels[which(kmedoid_labels$V1 == x),,drop=F] %>% rownames()
+    fc_clusters[[clustername]] <- fc[y %>% as.numeric(),]
+    fc_clusters[[clustername]]$feat_num <- y 
+}
+
+### eigenfactors
+### Singular value decomposition for genome-wide expression data processing and modeling
+###  https://doi.org/10.1073/pnas.97.18.10101
+## https://www.biostars.org/p/299167/
+## eigengenes <- svd(X)$v
+## We are using PCA
+#pca_clusters <- lapply(fc_clusters, function(x) prcomp(x %>% dplyr::select(-feat_num) %>% t(), center=T, scale=F)$x)
+# grabbing the first principal component
+## We are using PCA
+pca_clusters <- lapply(fc_clusters, function(x) prcomp(x %>% dplyr::select(-feat_num) %>% t(), center=T, scale=F)$x)
+svd_clusters <- lapply(fc_clusters, function(x) svd(x %>% dplyr::select(-feat_num))$v)
+# grabbing the first principal component
+svd1_cluster <- lapply(svd_clusters,  "[", , 1)
+pc1_cluster <- lapply(pca_clusters,  "[", , 1)
+clustereigenfactors_pca <- bind_cols(pc1_cluster) %>% data.frame()
+clustereigenfactors_svd <- bind_cols(svd1_cluster) %>% data.frame()
+```
+
+After calculating eigenfactors for each peptide cluster, we correlate each eigenfactor to each sample's drug treatment.
+
+```{r message=F, warning=F}
+## make a factored dataframe of the compounds
+noctrlmeta <- noctrlmeta %>% mutate(drug_conc = paste0(Drug, "-", Conc))
+
+datTraits <- data.frame(compounds= as.factor(noctrlmeta$drug_conc))
+rownames(datTraits) <- noctrlmeta$Name
+traits <- model.matrix(~ ., data=datTraits,
+                       contrasts.arg = lapply(datTraits, contrasts, contrasts=FALSE))
+traits <- traits[,-1] ##removing intercept
+moduleTraitCor_pca <- stats::cor(clustereigenfactors_pca, traits, method = "s")
+moduleTraitCor_svd <- stats::cor(clustereigenfactors_svd, traits, method = "s")
+colnames(moduleTraitCor_pca) <- colnames(moduleTraitCor_pca) %>% substr(., 10, nchar(colnames(moduleTraitCor_pca)))
+colnames(moduleTraitCor_svd) <- colnames(moduleTraitCor_svd) %>% substr(., 10, nchar(colnames(moduleTraitCor_svd)))
+```
+
+We cluster drug treatments using correlation distance. To identify robust clusters, we perform 1000 bootstrap iterations. 
+
+We cluster drug treatments using correlation distance. To identify robust clusters, we perform 1000 bootstrap iterations. Let's look at *PCA-derived* eigenfeature clusters first.
+
+```{r, message=F, warning = F}
+module_clust_pca <- hclust(as.dist(1-cor(t(moduleTraitCor_pca), method="pearson")), method="average")
+drug_clust_pca <- hclust(as.dist(1-cor(moduleTraitCor_pca, method="pearson")), method="average")
+drug_clust_boot_pca <- pvclust(moduleTraitCor_pca, method.hclust="average",
+                           method.dist="correlation", nboot=1000,
+                           iseed=2248)
+
+## Visualize the bootstrap clusters
+clust_boot_pca <- as.dendrogram(drug_clust_boot_pca)
+drug_clust_boot_pca %>% as.dendrogram() %>% plot(main = "test")
+drug_clust_boot_pca %>% text 
+drug_clust_boot_pca %>% pvrect(alpha=0.9, pv="au")
+
+## Function for quick silhouette score calculation
+
+new_palette <- colorRampPalette(c("#70A9A1", "white", "#FF9633"))(n=120)
+
+## metadata for clustr heatmap
+cor_meta_pca <- data.frame(treatment = colnames(moduleTraitCor_pca)) %>%
+    mutate(drug_col = case_when(str_detect(treatment, 'AZ') ~ '#3444DA',
+                                str_detect(treatment, 'CP') ~ '#DF737A',
+                                str_detect(treatment, 'DC') ~ '#8C5999',
+                                str_detect(treatment, 'NZ') ~ '#D7C0D0',
+                                str_detect(treatment, 'PR') ~ '#FFBA49'
+                                )) %>%
+    mutate(conc_col = case_when(str_detect(treatment, '-H') ~ '#08090A',
+                                str_detect(treatment, '-M') ~ '#96999C',
+                                str_detect(treatment, '-L') ~ '#EAEBEB'))
+range(moduleTraitCor_pca)
+## Uncomment to save PDF of heatmap
+pdf(here::here("figs", "msms_kmed_hm_pca.pdf"), width=9, height=6)
+par(xpd = TRUE) # allows legend to be outside "official" plotting lines
+coords2 <- list(x=0, y=0.95)
+heatmap.2(moduleTraitCor_pca,
+          notecol="black",      # change font color of cell labels to black
+          density.info="none",  # turns off density plot inside color legend
+          trace="none",         # turns off trace lines inside the heat map
+          margins =c(5,0),      # widens margins around plot
+          col=new_palette,      # 
+          breaks=seq(-0.6,0.6,0.01),    # enable color transition at specified limits
+          dendrogram="col",     # only draw a row dendrogram
+          Colv=as.dendrogram(drug_clust_pca),            # turn off column clustering
+          Rowv=as.dendrogram(module_clust_pca),
+          #ColSideColors = cor_meta$drug_col,
+          ColSideColors = cor_meta_pca$drug_col,
+          labRow = "",
+          key.xlab ="Correlation",
+          key.title = NA,
+          lhei = c(1,4),
+          lwid= c(1,3),
+          cexCol = 1.2,
+          keysize = 1)
+legend(coords2, title = "Drug",legend=c("AZ","CP", "DC", "NZ", "PR"), 
+       fill=c("#3444DA",  "#DF737A", "#8C5999", "#D7C0D0", "#FFBA49"), cex=0.8, box.lty=0)
+# Uncomment if you are saving to file
+#dev.off()
+```
+Now, let's look at *SVD-derived* eigenfatures (this is the more common way of calculating an eigenfeature).
+
+```{r, message=F, warning = F}
+module_clust_svd <- hclust(as.dist(1-cor(t(moduleTraitCor_svd), method="pearson")), method="average")
+drug_clust_svd <- hclust(as.dist(1-cor(moduleTraitCor_svd, method="pearson")), method="average")
+drug_clust_boot_svd <- pvclust(moduleTraitCor_svd, method.hclust="average",
+                           method.dist="correlation", nboot=1000,
+                           iseed=2248)
+
+quick_sil <- function(hclust_out, distance, max_k){
+  silhouette_score <- function(i){
+    k=cutree(hclust_out,i)
+    ss <- silhouette(k, 1-cor(distance, method="pearson"))
+    mean(ss[, 3])
+    }
+  clustnum <- 2:max_k
+  avg_sil <- sapply(clustnum, silhouette_score)
+  avg_sil <- data.frame(num = clustnum, sil_score = avg_sil)
+  avg_sil <- rbind(c(1,0), avg_sil)
+  return(avg_sil)
+}
+
+ms2_svd_sil <- quick_sil(hclust_out=drug_clust_svd, distance = 1-cor(moduleTraitCor_svd, method="pearson"), max_k = 7) 
+(ms2_sil <- ggplot(ms2_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=3, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("MS2 - SVD")
+)
+
+
+## Visualize the bootstrap clusters
+clust_boot_svd <- as.dendrogram(drug_clust_boot_svd)
+#pdf(here::here("figs", "ms2_bootstrap_dend.pdf"), width=9, height =4)
+drug_clust_boot_svd %>% as.dendrogram() %>% plot(main = "MS/MS")
+drug_clust_boot_svd %>% text 
+drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
+#dev.off()
+
+## colours for dendrogram branches
+clust_cols_ms2_svd <- c("#DF737A", "#3444DA", "#59C9A5")
+## colours for heatmap
+new_palette <- colorRampPalette(c("#70A9A1", "white", "#FF9633"))(n=120)
+
+## metadata for clustr heatmap
+cor_meta_svd <- data.frame(treatment = colnames(moduleTraitCor_svd)) %>%
+    mutate(drug_col = case_when(str_detect(treatment, 'AZ') ~ '#3444DA',
+                                str_detect(treatment, 'CP') ~ '#DF737A',
+                                str_detect(treatment, 'DC') ~ '#8C5999',
+                                str_detect(treatment, 'NZ') ~ '#D7C0D0',
+                                str_detect(treatment, 'PR') ~ '#FFBA49'
+                                )) %>%
+    mutate(conc_col = case_when(str_detect(treatment, '-H') ~ '#08090A',
+                                str_detect(treatment, '-M') ~ '#96999C',
+                                str_detect(treatment, '-L') ~ '#EAEBEB'))
+#range(moduleTraitCor_svd)
+
+# dendrogram for plotting
+drug_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 3, col = clust_cols_ms2_svd)
+
+## Uncomment to save PDF of heatmap
+#pdf(here::here("..", "docFigs", "msms_kmed_hm_svd.pdf"), width=9, height=6)
+par(xpd = TRUE) # allows legend to be outside "official" plotting lines
+coords2 <- list(x=0, y=0.95)
+heatmap.2(moduleTraitCor_svd,
+          notecol="black",      # change font color of cell labels to black
+          density.info="none",  # turns off density plot inside color legend
+          trace="none",         # turns off trace lines inside the heat map
+          margins =c(5,0),      # widens margins around plot
+          col=new_palette,      # 
+          breaks=seq(-0.6,0.6,0.01),    # enable color transition at specified limits
+          dendrogram="col",     # only draw a row dendrogram
+          Colv=drug_dend,            # turn off column clustering
+          Rowv=as.dendrogram(module_clust_svd),
+          #ColSideColors = cor_meta$drug_col,
+          ColSideColors = cor_meta_svd$drug_col,
+          labRow = "",
+          key.xlab ="Pearson's Correlation Coefficient",
+          key.title = NA,
+          lhei = c(1,4),
+          lwid= c(1,3),
+          cexCol = 1.2,
+          keysize = 1)
+legend(coords2, title = "Drug",legend=c("AZ","CP", "DC", "NZ", "PR"), 
+       fill=c("#3444DA",  "#DF737A", "#8C5999", "#D7C0D0", "#FFBA49"), cex=0.8, box.lty=0)
+# Uncomment if you are saving to file
+#dev.off()
+```
+
+
+
+Let's save the clustering output so that we can compare to the MS1 results.
+
+```{r}
+msms_moduleTraitCor_pca <- moduleTraitCor_pca
+msms_drugclustboot_pca <- drug_clust_boot_pca
+msms_drugclust_pca <- drug_clust_pca
+msms_moduleTraitCor_svd <- moduleTraitCor_svd
+msms_drugclustboot_svd <- drug_clust_boot_svd
+msms_drugclust_svd <- drug_clust_svd
+# Uncomment to save the RData file
+save(msms_moduleTraitCor_pca, msms_drugclust_pca, msms_drugclustboot_pca,
+     msms_moduleTraitCor_svd, msms_drugclust_svd, msms_drugclustboot_svd,
+     file=here::here("data", "msms", "msms_dedro.RData"))
+```
+
+
