@@ -90,7 +90,7 @@ mixing_cor = pairwise_distances(S_, Y=None, metric='correlation', n_jobs=nthread
 
 ## Trying Kmedoids
 ## see which k has best silhouette score
-k_list = list(range(2, 50))
+k_list = list(range(10, 51))
 
 ## Ignore computed best_k_med if user supplies k
 if args.k_choice is not None:
