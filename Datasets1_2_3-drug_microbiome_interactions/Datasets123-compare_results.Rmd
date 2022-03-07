@@ -1,0 +1,229 @@
+---
+title: "Comparing dendrograms from Datasets 1,2,3"
+output: html_notebook
+---
+
+We want to compare the clusters identified from Datasets 1, 2, 3 to see how similar the results are.
+
+To compare these dendrograms, we must first load required libraries and saved Rdata files.
+
+```{r, message=F, error=F}
+#library(renv) #remotes::install_github("rstudio/renv")
+#renv::restore()
+library(tidyverse)
+library(here)
+library(ggdendro)
+library(cluster)
+library(dendextend)
+#renv::snapshot()
+base::load(here::here("data", "Dataset1", "dataset1-ms1_dedro.RData"))          
+dataset1_clust <- ms1_drugclust_svd
+dataset1_clustboot <- ms1_drugclustboot_svd
+dataset1_distance <- ms1_moduleTraitCor_svd
+
+rm(ms1_drugclust_svd)
+rm(ms1_drugclustboot_svd)
+rm(ms1_moduleTraitCor_svd)
+
+base::load(here::here("data", "Dataset2", "dataset2-msms_dedro.RData"))   
+
+dataset2_clust <- msms_drugclust_svd
+dataset2_clustboot <- msms_drugclustboot_svd
+dataset2_distance <- msms_moduleTraitCor_svd
+
+rm(msms_drugclust_svd)
+rm(msms_drugclustboot_svd)
+rm(msms_moduleTraitCor_svd)
+
+base::load(here::here("data", "Dataset3", "dataset3-ms1_60dedro.RData"))   
+
+dataset3_clust <- ms1_60drugclust_svd
+dataset3_clustboot <- ms1_60drugclustboot_svd
+dataset3_distance <- ms1_60moduleTraitCor_svd
+
+rm(ms1_60drugclust_svd)
+rm(ms1_60drugclustboot_svd)
+rm(ms1_60moduleTraitCor_svd)
+```
+
+We have previously calculated the best `k` choice for each dendrogram, and so we will use this previous information where: 
+- Dataset 1: k=5
+- Dataset 2: k=3
+- Dataset 3: k=4
+
+# Dataset 1 vs Dataset 2
+
+```{r}
+pink <- "#DF737A"
+blackcof <- "#2E1F27"
+teal <- "#59C9A5"
+yellow <- "#FFE66D"
+blue <- "#3444DA"
+
+clust_cols_D1 <- c("#DF737A", "#2E1F27", "#59C9A5","#FFE66D", "#3444DA")
+clust_cols_D2 <-  c(pink, teal, blue)
+
+dataset1_dend <- dataset1_clust %>% as.dendrogram() %>% color_branches(k=5, col=clust_cols_D1) %>%
+    dendextend::set("branches_lwd", 3) 
+
+dataset2_dend <- dataset2_clust %>% as.dendrogram() %>% color_branches(k=3, col=clust_cols_D2) %>%
+    dendextend::set("branches_lwd", 3) 
+
+compare_D1D2<- dendlist(dataset1_dend , dataset2_dend ) %>% untangle(method = "step2side")
+compare_D1D2 %>% entanglement() #0.044
+
+
+#pdf("../../4.mSystems/2.revisionv2/figs/tanglegramD1D2.pdf", width=6, height=5)
+tanglegram(compare_D1D2, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main="", main_left="Dataset 1", main_right="Dataset 2")
+#dev.off()
+
+```
+
+```{r}
+### cophenetic correlation value
+
+## "The value can range between -1 to 1. With near 0 values meaning that the two trees are not statistically similar. For exact p-value one should result to a permutation test. One such option will be to permute over the labels of one tree many times, and calculating the distribution under the null hypothesis (keeping the trees topologies constant)." 
+## Null hypothesis is correlation = 0 
+## two tailed:  H1  cor != 0
+## one tailed: H1 cor > 0 OR H1 cor < 0
+factorial(15) # this is the top number of permutations...still quite a lot 
+
+cor_coph <- cor_cophenetic(dataset1_dend, dataset2_dend)
+set.seed(2248)
+R <- 10000
+cor_coph_results <- numeric(R)
+dend_mixed <- dataset2_dend #shuffle dataset2_dend
+for (i in 1:R){
+  dend_mixed <- sample.dendrogram(dend_mixed, replace = F) #just swapping labels for a permutation p-value
+  cor_coph_results[i] <- cor_cophenetic(dataset1_dend, dend_mixed) # compare to 
+}
+
+mean(abs(cor_coph_results)>=cor_coph)
+sum(abs(cor_coph_results)>=cor_coph)
+cor_coph_results <- cor_coph_results %>% as.data.frame()
+
+cor_coph_round <- cor_coph %>% round(., digits=3)
+
+(cor_coph_plot <-  ggplot(cor_coph_results, aes(x=.)) +
+    geom_density(fill = "#59c9a5", colour = "#59c9a5", alpha = 0.8) +
+    geom_vline(xintercept=1, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=0, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=cor_coph, size=1.2, colour="#df737a") +
+    annotate("text", x=0.3, y=4, label= paste0("r = ",cor_coph_round) ) +
+    ylab("Density") +
+    xlab("Cophenetic correlation coefficent") + 
+    theme_bw())
+#ggsave(file="../../4.mSystems/2.revisionv2/figs/corD1D2.pdf", width=6, height=4, units="in")
+```
+
+# Dataset 2 vs 3
+
+```{r}
+#clust_cols_D3 <- c(pink, yellow, blue,teal)
+clust_cols_D3 <- c(yellow, blue, pink,teal)
+dataset3_dend <- dataset3_clust %>% as.dendrogram() %>% color_branches(k=4, col=clust_cols_D3) %>%
+    dendextend::set("branches_lwd", 3) 
+set.seed(123)
+compare_D2D3<- dendlist(dataset2_dend , dataset3_dend ) %>% 
+    untangle("random", R=5) %>%
+    untangle(method = "step2side")
+compare_D2D3 %>% entanglement() #0.347
+
+
+#pdf("../../4.mSystems/2.revisionv2/figs/tanglegramD2D3.pdf", width=6, height=5)
+tanglegram(compare_D2D3, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main="", main_left="Dataset 2", main_right="Dataset 3")
+#dev.off()
+```
+
+```{r}
+### cophenetic correlation value
+
+## "The value can range between -1 to 1. With near 0 values meaning that the two trees are not statistically similar. For exact p-value one should result to a permutation test. One such option will be to permute over the labels of one tree many times, and calculating the distribution under the null hypothesis (keeping the trees topologies constant)." 
+## Null hypothesis is correlation = 0 
+## two tailed:  H1  cor != 0
+## one tailed: H1 cor > 0 OR H1 cor < 0
+#factorial(15) # this is the top number of permutations...still quite a lot 
+
+cor_coph <- cor_cophenetic(dataset2_dend, dataset3_dend)
+set.seed(2248)
+R <- 10000
+cor_coph_results <- numeric(R)
+dend_mixed <- dataset3_dend #shuffle dataset2_dend
+for (i in 1:R){
+  dend_mixed <- sample.dendrogram(dend_mixed, replace = F) #just swapping labels for a permutation p-value
+  cor_coph_results[i] <- cor_cophenetic(dataset2_dend, dend_mixed) # compare to 
+}
+
+mean(abs(cor_coph_results)>=cor_coph)
+sum(abs(cor_coph_results)>=cor_coph)
+cor_coph_results <- cor_coph_results %>% as.data.frame()
+
+cor_coph_round <- cor_coph %>% round(., digits=3)
+
+(cor_coph_plot <-  ggplot(cor_coph_results, aes(x=.)) +
+    geom_density(fill = "#59c9a5", colour = "#59c9a5", alpha = 0.8) +
+    geom_vline(xintercept=1, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=0, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=cor_coph, size=1.2, colour="#df737a") +
+    annotate("text", x=0.3, y=4, label= paste0("r = ",cor_coph_round) ) +
+    ylab("Density") +
+    xlab("Cophenetic correlation coefficent") + 
+    theme_bw())
+#ggsave(file="../../4.mSystems/2.revisionv2/figs/corD2D3.pdf", width=6, height=4, units="in")
+```
+
+
+
+# Dataset 1 vs Dataset 3
+
+```{r}
+
+compare_D1D3<- dendlist(dataset1_dend , dataset3_dend ) %>% untangle(method = "step2side")
+compare_D1D3 %>% entanglement() #0.314
+
+
+#("../../4.mSystems/2.revisionv2/figs/tanglegramD1D3.pdf", width=6, height=5)
+tanglegram(compare_D1D3, sort=F, common_subtrees_color_lines=F,highlight_branches_lwd = F, 
+           highlight_distinct_edges=F, main="", main_left="Dataset 1", main_right="Dataset 3")
+#dev.off()
+
+```
+
+```{r}
+### cophenetic correlation value
+
+## "The value can range between -1 to 1. With near 0 values meaning that the two trees are not statistically similar. For exact p-value one should result to a permutation test. One such option will be to permute over the labels of one tree many times, and calculating the distribution under the null hypothesis (keeping the trees topologies constant)." 
+## Null hypothesis is correlation = 0 
+## two tailed:  H1  cor != 0
+## one tailed: H1 cor > 0 OR H1 cor < 0
+factorial(15) # this is the top number of permutations...still quite a lot 
+
+cor_coph <- cor_cophenetic(dataset1_dend, dataset3_dend)
+set.seed(2248)
+R <- 10000
+cor_coph_results <- numeric(R)
+dend_mixed <- dataset3_dend #shuffle dataset2_dend
+for (i in 1:R){
+  dend_mixed <- sample.dendrogram(dend_mixed, replace = F) #just swapping labels for a permutation p-value
+  cor_coph_results[i] <- cor_cophenetic(dataset1_dend, dend_mixed) # compare to 
+}
+
+mean(abs(cor_coph_results)>=cor_coph)
+sum(abs(cor_coph_results)>=cor_coph)
+cor_coph_results <- cor_coph_results %>% as.data.frame()
+
+cor_coph_round <- cor_coph %>% round(., digits=3)
+
+(cor_coph_plot <-  ggplot(cor_coph_results, aes(x=.)) +
+    geom_density(fill = "#59c9a5", colour = "#59c9a5", alpha = 0.8) +
+    geom_vline(xintercept=1, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=0, size = 1, linetype = "dashed", colour="#2e1f27") +
+    geom_vline(xintercept=cor_coph, size=1.2, colour="#df737a") +
+    annotate("text", x=0.3, y=4, label= paste0("r = ",cor_coph_round) ) +
+    ylab("Density") +
+    xlab("Cophenetic correlation coefficent") + 
+    theme_bw())
+#ggsave(file="../../4.mSystems/2.revisionv2/figs/corD2D3.pdf", width=6, height=4, units="in")
+```
