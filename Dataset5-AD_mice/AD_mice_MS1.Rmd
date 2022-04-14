@@ -1,0 +1,738 @@
+---
+title: "AD mice - MS1-only"
+output: html_notebook
+---
+
+Loading necessary libraries
+
+```{r, message=F, error=F}
+library(renv) #remotes::install_github("rstudio/renv")
+#renv::restore()
+library(tidyverse)
+library(stringr)
+library(DESeq2)
+library(data.table)
+library(dendextend)
+library(here)
+library(impute)
+library(pvclust)
+library(gplots)
+library(RColorBrewer)
+library(cluster)
+library(cutr)#devtools::install_github("moodymudskipper/cutr")
+library(caret) 
+#library(mlbench)
+#library(MASS)
+#library(glmnet)
+#library(foreach)
+#library(doParallel)
+#registerDoParallel(cores=2)
+library(stringr)
+library(lubridate)
+library(umap)
+#library(sva)
+#renv::snapshot()
+```
+
+# Loading in data
+
+```{r}
+### For the openMS files
+## will have to edit...
+## sample info ../data/ms1_openms_sampleinfo.csv
+ad_samples <-  read.delim(here::here("Dataset5-AD_mice", "data", "ms1feature_info.txt"), sep='\t', header=F) %>%
+    mutate_if(is.character, str_trim)
+ad_metadata <- read.csv(here::here("Dataset5-AD_mice", "data", "experimentalGroups.csv"))
+ad_metadata <- left_join(ad_samples, ad_metadata, by = c("V3" = "Name"))
+
+
+features <- read.delim(here::here("Dataset5-AD_mice", "data", "ms1features.txt"), sep='\t')
+consensus_features <- features%>% dplyr::select(.,contains("cf")) %>% 
+    mutate(feat_num = 1:nrow(features))
+ms1 <- features %>% dplyr::select(.,-contains("cf"))
+rt <- ms1 %>% dplyr::select(.,contains("rt"))
+mz <- ms1 %>% dplyr::select(.,contains("mz"))
+charge <-  ms1 %>% dplyr::select(.,contains("charge"))
+intensity <- ms1 %>% dplyr::select(., contains("intensity")) %>% as.data.frame()
+
+ad_metadata <- ad_metadata %>% 
+    mutate(NewName = paste0(Mouse, "_", Condition))
+colnames(intensity) <- ad_metadata$NewName
+
+# reorganize df so that it's in the order of conditions (for filtering)
+ad_metadata <- ad_metadata %>%
+    arrange(., Condition)
+#intensity_info <- intensity %>% dplyr::select(feature_num, RT,MZ)
+intensity <- intensity %>% dplyr::select(ad_metadata$NewName)
+#colnames(intensity) <- paste0(colnames(intensity), "_", ibd_meta$Diagnosis) 
+intensity <- intensity %>% mutate(feat_num = 1:nrow(intensity))
+```
+
+We want to filter the data by missing values and low intensity values. MS1 data is inherently noisy, and so we also filter by low intensity. In this case, we identify intensity quartiles and consider the lowest quartile missing values **only** for the filtering step. We will keep these values for clustering.
+
+```{r}
+int <- intensity  %>%  dplyr::select(-feat_num) %>% as.data.frame %>% pivot_longer(names_to = "Name", values_to="intensity", cols=everything()) %>% drop_na()
+head(int)
+summary(int$intensity)
+int_4_quartiles <- smart_cut(int$intensity,4,"groups", labels = c("remove", "Low", "Med", "High"))
+table(int_4_quartiles)
+int$quart <- int_4_quartiles
+max_to_remove <- int %>% filter(quart == "remove")
+max_to_remove <- max_to_remove$intensity %>% max()
+
+dens <- density(log2(int$intensity))
+df <- data.frame(x=dens$x, y=dens$y)
+probs <- c(0,0.25,0.5,0.75,1)
+quantiles <- quantile(log2(int$intensity), prob=probs)
+df$quant <- factor(findInterval(df$x,quantiles))
+
+
+(pep_quart_plot <- ggplot(df, aes(x,y)) + geom_line() + 
+    geom_ribbon(aes(ymin=0, ymax=y, fill=quant)) + 
+    scale_x_continuous(breaks=quantiles) + 
+    #scale_fill_brewer(guide="none") +
+    xlab("MS1 feature intensities") +
+    ylab("Density") +
+    scale_fill_viridis_d(option = "plasma", guide = "none") +
+    theme_bw() +
+    theme(text=element_text(size=14)) 
+)
+
+
+
+
+cond_options_all <- table(ad_metadata$Condition) %>% as.data.frame()
+cond_opts_all <- cond_options_all$Var1
+cond_count_all <- cond_options_all$Freq * 0.5
+
+
+is.nan.data.frame <- function(x){
+    do.call(cbind, lapply(x, is.nan))}
+#df = intensity
+#conditions = cond_opts
+#min_count = cond_count
+## add condition to end of all col names...
+filter_valids_quart = function(df, conditions, min_count, int_remove, at_least_one = TRUE) {
+    df[is.nan.data.frame(df)] <- 0
+    df[is.na(df)] <- 0
+    df[df <= int_remove] <- 0
+    all_names <- colnames(df) 
+    cond.names = lapply(conditions, # Group column names by conditions
+                        function(x) grep(x, all_names, value = TRUE, perl = TRUE))
+    cond.filter = sapply(1:length(cond.names), function(i) {
+        df2 = df %>% dplyr::select(cond.names[[i]])   # Extract columns of interest
+        df2 = as.matrix(df2)   # Cast as matrix for the following command
+        sums = rowSums(df2!=0) # count the number of valid values for each condition
+        sums >= min_count[i]   # Calculates whether min_count requirement is met
+    })
+    if (at_least_one) {
+        df$KEEP = apply(cond.filter, 1, any)
+    } else {
+        df$KEEP = apply(cond.filter, 1, all)
+    }
+    return(df)  # only keeping rows that meet the criteria!
+}
+
+ 
+
+## filter by at least Q50 in each treatment considering ZEROS and anything in low quartile
+## trying without any quartile adjustment!
+ad_filt <- filter_valids_quart(intensity[,-24], 
+                               conditions = cond_opts_all,
+                               min_count = cond_count_all, 
+                               int_remove = max_to_remove,
+                               at_least_one = T) #78,808
+ad_filt <- intensity[ad_filt$KEEP == 1,-24] ## 27041
+filt_feat <- rownames(ad_filt)
+
+
+norm_feat<- estimateSizeFactorsForMatrix(ad_filt)
+norm_int <- sweep(ad_filt, 2, norm_feat, "/") ##peptides are normalized
+
+int <- norm_int %>% as.data.frame %>% pivot_longer(names_to = "Name", values_to="intensity", cols=everything()) %>% drop_na()
+head(int)
+summary(int$intensity)
+int_4_quartiles <- smart_cut(int$intensity,4,"groups", labels = c("remove", "Low", "Med", "High"))
+table(int_4_quartiles)
+int$quart <- int_4_quartiles
+#max_to_remove <- int %>% filter(quart == "remove")
+#max_to_remove <- max_to_remove$intensity %>% max()
+
+dens <- density(log2(int$intensity))
+df <- data.frame(x=dens$x, y=dens$y)
+probs <- c(0,0.25,0.5,0.75,1)
+quantiles <- quantile(log2(int$intensity), prob=probs)
+df$quant <- factor(findInterval(df$x,quantiles))
+
+
+(pep_quart_plot <- ggplot(df, aes(x,y)) + geom_line() + 
+    geom_ribbon(aes(ymin=0, ymax=y, fill=quant)) + 
+    scale_x_continuous(breaks=quantiles) + 
+    #scale_fill_brewer(guide="none") +
+    xlab("MS1 feature intensities") +
+    ylab("Density") +
+    scale_fill_viridis_d(option = "plasma", guide = "none") +
+    theme_bw() +
+    theme(text=element_text(size=14)) 
+)
+
+```
+
+## Missing data imputation
+
+Although we filtered data, we are still left with missing values that will cause challenges with log transformation and fold change calculations. We used a KNN data imputation.
+
+```{r, message=F, warning=F}
+## impute missing values
+#intensity_0 <- intensity %>%  mutate_all(~replace(., is.nan(.), 0))
+
+imputed_feat <- impute.knn(norm_int %>% as.matrix(), k = 10, rowmax = 0.5, colmax = 0.95, rng.seed = 362436069)
+```
+
+## UMAP 
+
+```{r}
+ad_metadata <- ad_metadata %>%
+    mutate(AD = ifelse(str_detect(Experiment, "AD"), "AD", "NTg"), #nontransgenic
+           Drug = ifelse(str_detect(Experiment, "drug"), "Drug", "Vehicle"),
+           Time = ifelse(str_detect(Experiment, "CT10"), "CT10", "CT14"),
+           AD_Drug = paste0(AD, "_", Drug))
+
+imputed_noZero <- imputed_feat$data
+imputed_noZero[imputed_noZero  == 0] <- 0.0001
+
+log_exp <- data.frame(imputed_noZero) %>%
+    mutate_all(., funs(log2(.)))
+colnames(log_exp) = colnames(imputed_feat$data)
+
+CT14 <- log_exp %>% select(contains("CT14"))
+    
+CT10 <- log_exp %>% select(contains("CT10"))
+
+
+CT14_umap <- umap(CT14 %>% as.matrix %>% t(), n_components=2, random_state=2248, 
+                 n_neighbors=10)
+
+
+CT10_umap <- umap(CT10 %>% as.matrix %>% t(), n_components=2, random_state=2248, 
+                 n_neighbors=10)
+ms1_umap <- umap(log_exp %>% as.matrix %>% t(), n_components=2, random_state=2248)
+#ibd_meta <- ibd_meta[match(colnames(log_exp), ibd_meta$NewName),]
+coords_umap<-data.frame(ms1_umap$layout, 
+                        Drug = ad_metadata$Drug,
+                        Time = ad_metadata$Time,
+                        Condition = ad_metadata$AD_Drug,
+                        AD = ad_metadata$AD)
+
+CT14_metadata <- ad_metadata %>% dplyr::filter(NewName %in% colnames(CT14)) %>%
+    mutate(check = colnames(CT14))
+CT10_metadata <- ad_metadata %>% dplyr::filter(NewName %in% colnames(CT10)) %>%
+    mutate(check = colnames(CT10))
+
+
+
+CT14_umap<-data.frame(CT14_umap$layout, 
+                        Drug = CT14_metadata$Drug,
+                        Time = CT14_metadata$Time,
+                        Condition = CT14_metadata$AD_Drug,
+                        AD = CT14_metadata$AD)
+
+CT10_umap<-data.frame(CT10_umap$layout, 
+                        Drug = CT10_metadata$Drug,
+                        Time = CT10_metadata$Time,
+                        Condition = CT10_metadata$AD_Drug,
+                        AD = CT10_metadata$AD)
+
+(umap_plot_condition <- ggplot(coords_umap, aes(x = X1, y = X2)) +
+        geom_point(data = coords_umap, aes(color = Condition,shape = Time, ), 
+                   size=5) +
+        scale_color_manual(values=c("#FE4A49", "#2AB7CA", "#FED766"))+
+        scale_x_continuous(name="UMAP1") + 
+        scale_y_continuous(name="UMAP2") +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16)) +
+        guides(colour = guide_legend(order = 1), 
+              shape = guide_legend(order = 2)))
+
+
+(umap_plot_CT14 <- ggplot(CT14_umap, aes(x = X1, y = X2)) +
+        geom_point(aes(color = Condition,shape = AD, ), 
+                   size=5) +
+        scale_color_manual(values=c("#FE4A49", "#2AB7CA", "#FED766"))+
+        scale_x_continuous(name="UMAP1") + 
+        scale_y_continuous(name="UMAP2") +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16)) +
+        guides(colour = guide_legend(order = 1), 
+              shape = guide_legend(order = 2)))
+
+(umap_plot_CT10 <- ggplot(CT10_umap, aes(x = X1, y = X2)) +
+        geom_point(aes(color = Condition,shape = AD, ), 
+                   size=5) +
+        scale_color_manual(values=c("#FE4A49", "#2AB7CA", "#FED766"))+
+        scale_x_continuous(name="UMAP1") + 
+        scale_y_continuous(name="UMAP2") +
+        theme_bw() +
+        theme(legend.position = "right", text=element_text(size=16)) +
+        guides(colour = guide_legend(order = 1), 
+              shape = guide_legend(order = 2)))
+
+#ggsave( here::here("Dataset5-AD_mice", "AC-mice_umap.pdf"), umap_plot_condition, width=8, height=6, units="in")
+#ggsave( here::here("Dataset5-AD_mice", "CT10", "AC-mice-CT10_umap.pdf"), umap_plot_CT10, width=8, height=6, units="in")
+#ggsave( here::here("Dataset5-AD_mice", "CT14", "AC-mice-CT14_umap.pdf"), umap_plot_CT14, width=8, height=6, units="in")
+#write.csv(log_exp, here::here("Dataset5-AD_mice","data", "dataset5-ms1_log2_normalized.csv"), quote=F, row.names = T)
+#write.csv(CT14, here::here("Dataset5-AD_mice","data", "dataset5-ms1_CT14-log2_normalized.csv"), quote=F, row.names = T)
+#write.csv(CT10, here::here("Dataset5-AD_mice","data", "dataset5-ms1_CT10-log2_normalized.csv"), quote=F, row.names = T)
+```
+
+## Clustering
+
+Note: we are using [precise-db's](https://github.com/SBRG/precise-db) ICA implementation.
+Clustering can be completed the following scripts provided in `bin/`. The ICA implementation of precise-db requires a conda environment which can be accessed using `conda activate precise-db`.
+
+Once ICA has completed it's run, you will find `S.csv` (and other relevent files) in your chosen output directory. We will be clustering this matrix using `kmed_clustering.py` This script was written considering the newest versions of used packages, thus, `kmed_clustering.py` also has it's own `conda` environment named `k-med`. 
+
+The following should be run in your terminal and requires `conda` and `python`.
+
+```{zsh engine.opts='-i', eval=F}
+## THIS IS A SHELL SCRIPT
+## It is best to run this in it's own terminal window because of RStudio's memory limitations 
+cd ./bin
+# You will need to create a specific conda environment for ICA. 
+# Uncomment the code below to create the environment
+# conda env create -f environment.yml
+conda activate precise-db
+## script for robust ICA matrix decomposition
+## Update -n to as many threads you have available; ideally at least 6 
+## However this will run on a laptop with fewer cores, it just may take longer 
+sh run_ica.sh -i 100 -t 1e-8 -n 6 -o ../Dataset5-AD_mice/ -l ./Dataset5-AD_mice/CT10/ica.log ../Dataset5-AD_mice/data/dataset5-ms1_log2_normalized.csv
+conda deactivate 
+
+# to create the correct conda environment for clustering
+#conda env create -f k-med_env.yml
+# This k-medoid clustering relies on newer modules than the ica implementation 
+conda activate k-med 
+./kmed_clutering.py -s ../data/Dataset1/S.csv -d ../data/Dataset1/
+conda deactivate 
+
+```
+
+
+## Cluster eigenfeature calculation and clustering visualization
+
+After we use `Python` for clustering our relatively large dataset, let's calculate summary statistics of each peptide cluster considering the peptide intensity values. We will calculate the clusters for all the data together, just CT10 and just CT14
+
+### Clustering all
+
+```{r message=F, warning=F}
+kmedoid_labels <- read.csv(here::here("Dataset5-AD_mice", "k-med_labels.csv"), header=F) %>% as.vector()
+
+clusterinfopep <- kmedoid_labels %>% data.frame()
+
+max_clust <- kmedoid_labels %>% unique() %>% max()
+print(paste("Number of clusters:", max_clust+1))
+clusters <- list()
+
+## creating a list that contains intensities of each peptide cluster
+for (x in 0:max_clust){
+    clustername <- paste("Cluster", x)
+    y <- kmedoid_labels[which(kmedoid_labels$V1 == x),,drop=F] %>% rownames()
+    intensities <- log_exp[y %>% as.numeric(),] %>% as.data.frame()
+    #intensities <- intensities %>% mutate(feat_num = y)
+    clusters[[clustername]] <- intensities
+}
+
+### eigenfactors
+### Singular value decomposition for genome-wide expression data processing and modeling
+###  https://doi.org/10.1073/pnas.97.18.10101
+## https://www.biostars.org/p/299167/
+## eigengenes <- svd(X)$v
+
+svd_clusters <- lapply(clusters, function(x) svd(x)$v)
+# grabbing the first principal component
+svd1_cluster <- lapply(svd_clusters,  "[", , 1)
+
+
+clustereigenfactors_svd <- bind_cols(svd1_cluster) %>% data.frame()
+```
+
+
+Complete the correlation with AD mice conditions
+
+```{r message=F, warning=F}
+## make a factored dataframe of the compounds
+
+datTraits <- data.frame(Condition =  as.factor(ad_metadata$Condition))
+rownames(datTraits) <- ad_metadata$NewName
+traits <- model.matrix(~ ., data=datTraits,
+                       contrasts.arg = lapply(datTraits, contrasts, contrasts=FALSE))
+traits <- traits[,-1] ##removing intercept
+#moduleTraitCor_pca <- stats::cor(clustereigenfactors_pca, traits, method = "s")
+moduleTraitCor_svd <- stats::cor(clustereigenfactors_svd, traits, method = "s")
+#colnames(moduleTraitCor_pca) <- colnames(moduleTraitCor_pca) %>% substr(., 10, nchar(colnames(moduleTraitCor_pca)))
+colnames(moduleTraitCor_svd) <- colnames(moduleTraitCor_svd) %>% substr(., 10, nchar(colnames(moduleTraitCor_svd)))
+```
+
+Now, let's look at *SVD-derived* eigenfeatures (this is the more common way of calculating an eigenfeature).
+
+```{r message=F, warning = F}
+module_clust_svd <- hclust(as.dist(1-cor(t(moduleTraitCor_svd), method="pearson")), method="average")
+drug_clust_svd <- hclust(as.dist(1-cor(moduleTraitCor_svd, method="pearson")), method="average")
+drug_clust_boot_svd <- pvclust(moduleTraitCor_svd, method.hclust="average",
+                           method.dist="correlation", nboot=1000,
+                           iseed=2248)
+
+quick_sil <- function(hclust_out, distance, max_k){
+  silhouette_score <- function(i){
+    k=cutree(hclust_out,i)
+    ss <- silhouette(k, 1-cor(distance, method="pearson"))
+    mean(ss[, 3])
+    }
+  clustnum <- 2:max_k
+  avg_sil <- sapply(clustnum, silhouette_score)
+  avg_sil <- data.frame(num = clustnum, sil_score = avg_sil)
+  avg_sil <- rbind(c(1,0), avg_sil)
+  return(avg_sil)
+}
+#
+ms1_svd_sil <- quick_sil(hclust_out=drug_clust_svd, distance = 1-cor(moduleTraitCor_svd, method="pearson"), max_k = 4) 
+(ms1_sil <- ggplot(ms1_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("AD-mice MS1-only clusters")
+)
+
+## Visualize the bootstrap clusters
+clust_boot_svd <- as.dendrogram(drug_clust_boot_svd)
+#pdf(here::here("figs", "ms1_bootstrap_dend.pdf"), width=9, height =4)
+drug_clust_boot_svd %>% as.dendrogram() %>% plot(main = "MS1")
+drug_clust_boot_svd %>% text 
+drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
+#dev.off()
+
+## colours for dendrogram branches
+clust_cols_ms1_svd <- c("#48392A", "#48392A")
+
+ad_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 2, col = clust_cols_ms1_svd) %>%
+    set("branches_lwd", 2)
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- branches_attr_by_clusters(
+  ad_dend,
+  clusters = k_2,
+  values = c(1,2),
+  attr =  "lty"
+)
+## metadata for clustr heatmap
+# red, blue, yellow
+##"#FE4A49", "#2AB7CA", "#FED766" 
+
+cor_meta_svd <- data.frame(Sample = labels(ad_dend)) %>%
+    mutate(#AD = case_when(str_detect(Sample, 'AD') ~ '#1446A0',
+            #              str_detect(Sample, 'NTg') ~ '#DB3069'),
+   # Drug = case_when(str_detect(Sample, '-D-') ~ '#F57251',
+    #                      str_detect(Sample, '-V-') ~ '#3444DA'),
+    Time = case_when(str_detect(Sample, '_CT10') ~ '#131112',
+                          str_detect(Sample, '_CT14') ~ '#F7F7FF'),
+    Condition = case_when(str_detect(Sample, 'AD_drug') ~ '#FE4A49',
+                          str_detect(Sample, 'AD_vehicle') ~ '#2AB7CA',
+                          str_detect(Sample, 'NTg_vehicle') ~ '#FED766'))
+
+
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- ad_dend %>% set_labels(., 
+                                  labels = c("AD_V_10","AD-D-10",
+                                             "AD-V-14", "NTg-V-10", 
+                                             "AD-D-14", "NTg-V-14"))
+#ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("CD", "UC (infl.)",
+#                                                        "Control", "CD (infl.)", #"UC"))
+pdf(here::here("Dataset5-AD_mice", "AD-mice-dend.pdf"))
+ad_dend %>% plot()
+colored_bars(colors = cor_meta_svd %>% dplyr::select(-Sample), dend = ad_dend, sort_by_labels_order = FALSE, y_shift=-0.27)
+dev.off()
+
+```
+
+
+#CLustering CT10
+```{r message=F, warning=F}
+
+kmedoid_labels_CT10 <- read.csv(here::here("Dataset5-AD_mice", "CT10", "k-med_labels.csv"), header=F) %>% as.vector()
+
+#kmedoid_labels_CT14 <- read.csv(here::here("Dataset5-AD_mice", "CT14", "k-med_labels.csv"), header=F) %>% as.vector()
+
+
+
+clusterinfoCT10 <- kmedoid_labels_CT10 %>% data.frame()
+#clusterinfoCT14 <- kmedoid_labels_CT14 %>% data.frame()
+
+
+max_clust_CT10 <- kmedoid_labels_CT10 %>% unique() %>% max()
+print(paste("Number of clusters all data points:", max_clust+1))
+clusters <- list()
+## creating a list that contains intensities of each peptide cluster
+for (x in 0:max_clust){
+    clustername <- paste("Cluster", x)
+    y <- kmedoid_labels_CT10[which(kmedoid_labels_CT10$V1 == x),,drop=F] %>% rownames()
+    intensities <- CT10[y %>% as.numeric(),] %>% as.data.frame()
+    intensities <- intensities %>% mutate(feat_num = y)
+    clusters[[clustername]] <- intensities
+}
+
+### eigenfactors
+### Singular value decomposition for genome-wide expression data processing and modeling
+###  https://doi.org/10.1073/pnas.97.18.10101
+## https://www.biostars.org/p/299167/
+## eigengenes <- svd(X)$v
+
+
+svd_clusters <- lapply(clusters, function(x) svd(x %>% dplyr::select(-feat_num))$v)
+# grabbing the first principal component
+svd1_cluster <- lapply(svd_clusters,  "[", , 1)
+
+
+clustereigenfactors_svd <- bind_cols(svd1_cluster) %>% data.frame()
+```
+
+```{r message=F, warning=F}
+## make a factored dataframe of the compounds
+
+datTraits <- data.frame(Condition =  as.factor(CT10_metadata$Condition))
+rownames(datTraits) <- CT10_metadata$NewName
+traits <- model.matrix(~ ., data=datTraits,
+                       contrasts.arg = lapply(datTraits, contrasts, contrasts=FALSE))
+traits <- traits[,-1] ##removing intercept
+#moduleTraitCor_pca <- stats::cor(clustereigenfactors_pca, traits, method = "s")
+moduleTraitCor_svd <- stats::cor(clustereigenfactors_svd, traits, method = "s")
+#colnames(moduleTraitCor_pca) <- colnames(moduleTraitCor_pca) %>% substr(., 10, nchar(colnames(moduleTraitCor_pca)))
+colnames(moduleTraitCor_svd) <- colnames(moduleTraitCor_svd) %>% substr(., 10, nchar(colnames(moduleTraitCor_svd)))
+```
+
+Now, let's look at *SVD-derived* eigenfeatures (this is the more common way of calculating an eigenfeature).
+
+```{r message=F, warning = F}
+module_clust_svd <- hclust(as.dist(1-cor(t(moduleTraitCor_svd), method="pearson")), method="average")
+drug_clust_svd <- hclust(as.dist(1-cor(moduleTraitCor_svd, method="pearson")), method="average")
+drug_clust_boot_svd <- pvclust(moduleTraitCor_svd, method.hclust="average",
+                           method.dist="correlation", nboot=1000,
+                           iseed=2248)
+
+quick_sil <- function(hclust_out, distance, max_k){
+  silhouette_score <- function(i){
+    k=cutree(hclust_out,i)
+    ss <- silhouette(k, 1-cor(distance, method="pearson"))
+    mean(ss[, 3])
+    }
+  clustnum <- 2:max_k
+  avg_sil <- sapply(clustnum, silhouette_score)
+  avg_sil <- data.frame(num = clustnum, sil_score = avg_sil)
+  avg_sil <- rbind(c(1,0), avg_sil)
+  return(avg_sil)
+}
+#
+ms1_svd_sil <- quick_sil(hclust_out=drug_clust_svd, distance = 1-cor(moduleTraitCor_svd, method="pearson"), max_k = 2) 
+(ms1_sil <- ggplot(ms1_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("AD-mice MS1-only clusters")
+)
+
+## Visualize the bootstrap clusters
+clust_boot_svd <- as.dendrogram(drug_clust_boot_svd)
+#pdf(here::here("figs", "ms1_bootstrap_dend.pdf"), width=9, height =4)
+drug_clust_boot_svd %>% as.dendrogram() %>% plot(main = "MS1")
+drug_clust_boot_svd %>% text 
+drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
+#dev.off()
+
+## colours for dendrogram branches
+clust_cols_ms1_svd <- c("#48392A", "#48392A")
+
+ad_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 2, col = clust_cols_ms1_svd) %>%
+    set("branches_lwd", 2)
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- branches_attr_by_clusters(
+  ad_dend,
+  clusters = k_2,
+  values = c(1,2),
+  attr =  "lty"
+)
+## metadata for clustr heatmap
+# red, blue, yellow
+##"#FE4A49", "#2AB7CA", "#FED766" 
+
+cor_meta_svd <- data.frame(Sample = labels(ad_dend)) %>%
+    mutate(#AD = case_when(str_detect(Sample, 'AD') ~ '#1446A0',
+            #              str_detect(Sample, 'NTg') ~ '#DB3069'),
+   # Drug = case_when(str_detect(Sample, '-D-') ~ '#F57251',
+    #                      str_detect(Sample, '-V-') ~ '#3444DA'),
+    #Time = case_when(str_detect(Sample, '-10') ~ '#131112',
+    #                      str_detect(Sample, '-14') ~ '#F7F7FF'),
+    Condition = case_when(str_detect(Sample, 'AD_drug') ~ '#FE4A49',
+                          str_detect(Sample, 'AD_vehicle') ~ '#2AB7CA',
+                          str_detect(Sample, 'NTg_vehicle') ~ '#FED766'))
+
+
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- ad_dend %>% set_labels(., 
+                                  labels = c("AD_vehicle", "AD_drug", "NTg_vehicle"))
+#ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("CD", "UC (infl.)",
+#                                                        "Control", "CD (infl.)", #"UC"))
+#pdf(here::here("Dataset5-AD_mice", "CT10", "AD-mice-CT10-dend.pdf"))
+ad_dend %>% plot()
+colored_bars(colors = cor_meta_svd %>% dplyr::select(-Sample), dend = ad_dend, sort_by_labels_order = FALSE, y_shift=-.35)
+#dev.off()
+
+```
+
+
+### Clustering CT14
+```{r message=F, warning=F}
+
+kmedoid_labels_CT14 <- read.csv(here::here("Dataset5-AD_mice", "CT14", "k-med_labels.csv"), header=F) %>% as.vector()
+
+#kmedoid_labels_CT14 <- read.csv(here::here("Dataset5-AD_mice", "CT14", "k-med_labels.csv"), header=F) %>% as.vector()
+
+
+
+clusterinfoCT14 <- kmedoid_labels_CT14 %>% data.frame()
+#clusterinfoCT14 <- kmedoid_labels_CT14 %>% data.frame()
+
+
+max_clust_CT14 <- kmedoid_labels_CT14 %>% unique() %>% max()
+print(paste("Number of clusters all data points:", max_clust+1))
+clusters <- list()
+## creating a list that contains intensities of each peptide cluster
+for (x in 0:max_clust){
+    clustername <- paste("Cluster", x)
+    y <- kmedoid_labels_CT14[which(kmedoid_labels_CT14$V1 == x),,drop=F] %>% rownames()
+    intensities <- CT14[y %>% as.numeric(),] %>% as.data.frame()
+    intensities <- intensities %>% mutate(feat_num = y)
+    clusters[[clustername]] <- intensities
+}
+
+### eigenfactors
+### Singular value decomposition for genome-wide expression data processing and modeling
+###  https://doi.org/10.1073/pnas.97.18.10101
+## https://www.biostars.org/p/299167/
+## eigengenes <- svd(X)$v
+
+
+svd_clusters <- lapply(clusters, function(x) svd(x %>% dplyr::select(-feat_num))$v)
+# grabbing the first principal component
+svd1_cluster <- lapply(svd_clusters,  "[", , 1)
+
+
+clustereigenfactors_svd <- bind_cols(svd1_cluster) %>% data.frame()
+```
+
+```{r message=F, warning=F}
+## make a factored dataframe of the compounds
+
+datTraits <- data.frame(Condition =  as.factor(CT14_metadata$Condition))
+rownames(datTraits) <- CT14_metadata$NewName
+traits <- model.matrix(~ ., data=datTraits,
+                       contrasts.arg = lapply(datTraits, contrasts, contrasts=FALSE))
+traits <- traits[,-1] ##removing intercept
+#moduleTraitCor_pca <- stats::cor(clustereigenfactors_pca, traits, method = "s")
+moduleTraitCor_svd <- stats::cor(clustereigenfactors_svd, traits, method = "s")
+#colnames(moduleTraitCor_pca) <- colnames(moduleTraitCor_pca) %>% substr(., 10, nchar(colnames(moduleTraitCor_pca)))
+colnames(moduleTraitCor_svd) <- colnames(moduleTraitCor_svd) %>% substr(., 10, nchar(colnames(moduleTraitCor_svd)))
+```
+
+Now, let's look at *SVD-derived* eigenfeatures (this is the more common way of calculating an eigenfeature).
+
+```{r message=F, warning = F}
+module_clust_svd <- hclust(as.dist(1-cor(t(moduleTraitCor_svd), method="pearson")), method="average")
+drug_clust_svd <- hclust(as.dist(1-cor(moduleTraitCor_svd, method="pearson")), method="average")
+drug_clust_boot_svd <- pvclust(moduleTraitCor_svd, method.hclust="average",
+                           method.dist="correlation", nboot=1000,
+                           iseed=2248)
+
+quick_sil <- function(hclust_out, distance, max_k){
+  silhouette_score <- function(i){
+    k=cutree(hclust_out,i)
+    ss <- silhouette(k, 1-cor(distance, method="pearson"))
+    mean(ss[, 3])
+    }
+  clustnum <- 2:max_k
+  avg_sil <- sapply(clustnum, silhouette_score)
+  avg_sil <- data.frame(num = clustnum, sil_score = avg_sil)
+  avg_sil <- rbind(c(1,0), avg_sil)
+  return(avg_sil)
+}
+#
+ms1_svd_sil <- quick_sil(hclust_out=drug_clust_svd, distance = 1-cor(moduleTraitCor_svd, method="pearson"), max_k = 2) 
+(ms1_sil <- ggplot(ms1_svd_sil, aes(x=num, y = sil_score)) +
+  geom_point(size=4, colour="#F25C54", alpha=1) +
+    geom_line(size=2, alpha=0.4) +
+    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    xlab("Number of clusters") +
+    ylab("Average Silhouette Score") +
+    scale_x_continuous(breaks = 1:30) +
+    theme_classic(base_size=14) +
+    ggtitle("AD-mice MS1-only clusters")
+)
+
+## Visualize the bootstrap clusters
+clust_boot_svd <- as.dendrogram(drug_clust_boot_svd)
+#pdf(here::here("figs", "ms1_bootstrap_dend.pdf"), width=9, height =4)
+drug_clust_boot_svd %>% as.dendrogram() %>% plot(main = "MS1")
+drug_clust_boot_svd %>% text 
+drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
+#dev.off()
+
+## colours for dendrogram branches
+clust_cols_ms1_svd <- c("#48392A", "#48392A")
+
+ad_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 2, col = clust_cols_ms1_svd) %>%
+    set("branches_lwd", 2)
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- branches_attr_by_clusters(
+  ad_dend,
+  clusters = k_2,
+  values = c(1,2),
+  attr =  "lty"
+)
+## metadata for clustr heatmap
+# red, blue, yellow
+##"#FE4A49", "#2AB7CA", "#FED766" 
+
+cor_meta_svd <- data.frame(Sample = labels(ad_dend)) %>%
+    mutate(#AD = case_when(str_detect(Sample, 'AD') ~ '#1446A0',
+            #              str_detect(Sample, 'NTg') ~ '#DB3069'),
+   # Drug = case_when(str_detect(Sample, '-D-') ~ '#F57251',
+    #                      str_detect(Sample, '-V-') ~ '#3444DA'),
+    #Time = case_when(str_detect(Sample, '-10') ~ '#131112',
+    #                      str_detect(Sample, '-14') ~ '#F7F7FF'),
+    Condition = case_when(str_detect(Sample, 'AD_drug') ~ '#FE4A49',
+                          str_detect(Sample, 'AD_vehicle') ~ '#2AB7CA',
+                          str_detect(Sample, 'NTg_vehicle') ~ '#FED766'))
+
+
+
+k_2 <- cutree(ad_dend, k = 2, order_clusters_as_data = FALSE) 
+ad_dend <- ad_dend %>% set_labels(., 
+                                  labels = c("AD_vehicle", "AD_drug", "NTg_vehicle"))
+#ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("CD", "UC (infl.)",
+#                                                        "Control", "CD (infl.)", #"UC"))
+#pdf(here::here("Dataset5-AD_mice", "CT14", "AD-mice-CT14-dend.pdf"))
+ad_dend %>% plot()
+colored_bars(colors = cor_meta_svd %>% dplyr::select(-Sample), dend = ad_dend, sort_by_labels_order = FALSE, y_shift=-.35)
+#dev.off()
+
+```
