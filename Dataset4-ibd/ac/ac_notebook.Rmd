@@ -30,6 +30,8 @@ library(caret)
 library(stringr)
 library(lubridate)
 library(umap)
+library(glmnet)
+library(pROC)
 #library(sva)
 #renv::snapshot()
 ```
@@ -162,7 +164,7 @@ filter_valids_quart = function(df, conditions, min_count, int_remove, at_least_o
 ibd_filt <- filter_valids_quart(intensity[,-63], 
                                conditions = cond_opts_all,
                                min_count = cond_count_all, 
-                               int_remove = 1,
+                               int_remove = max_to_remove,
                                at_least_one = T) #213,383
 ibd_filt <- intensity[ibd_filt$KEEP == 1,-63] ## 17,035
 filt_feat <- rownames(ibd_filt)
@@ -259,11 +261,11 @@ labels <- pretty(coords_umap$Date, 5)
         scale_y_continuous(name="UMAP2") +
         theme_bw() +
         theme(legend.position = "right", text=element_text(size=16)))
-#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-diagnosis.pdf", umap_plot_diagnosis, width = 8, height = 6, units = "in")
-#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-diagnosis.eps", umap_plot_diagnosis, width = 8, height = 6, units = "in")
-#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-date.pdf", umap_plot_date, width = 8, height = 6, units = "in")
-#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-date.eps", umap_plot_date, width = 8, height = 6, units = "in")
-#write.csv(log_exp, here::here("Dataset4-ibd","ac", "dataset4-ac-ms1_log2_normalized.csv"), quote=F, row.names = T)
+#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-diagnosis_update.pdf", umap_plot_diagnosis, width = 8, height = 6, units = "in")
+#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-diagnosis_update.eps", umap_plot_diagnosis, width = 8, height = 6, units = "in")
+#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-date_update.pdf", umap_plot_date, width = 8, height = 6, units = "in")
+#ggsave(filename = "../../../4.mSystems/2.revisionv2/figs/umap-ac-date_update.eps", umap_plot_date, width = 8, height = 6, units = "in")
+#write.csv(log_exp, here::here("Dataset4-ibd","ac", "dataset4-ac-ms1_log2_normalized_update.csv"), quote=F, row.names = T)
 ```
 
 ## Log2 intensity transformation and PCA quality check
@@ -348,7 +350,7 @@ After we use `Python` for clustering our relatively large dataset, let's calcula
 
 ```{r message=F, warning=F}
 
-kmedoid_labels <- read.csv(here::here("Dataset4-ibd", "ac", "k-med_labels.csv"), header=F) %>% as.vector()
+kmedoid_labels <- read.csv(here::here("Dataset4-ibd", "ac","update", "k-med_labels.csv"), header=F) %>% as.vector()
 
 clusterinfopep <- kmedoid_labels %>% data.frame()
 
@@ -424,7 +426,7 @@ ms1_svd_sil <- quick_sil(hclust_out=drug_clust_svd, distance = 1-cor(moduleTrait
 (ms1_sil <- ggplot(ms1_svd_sil, aes(x=num, y = sil_score)) +
   geom_point(size=4, colour="#F25C54", alpha=1) +
     geom_line(size=2, alpha=0.4) +
-    geom_vline(xintercept=2, size = 2, linetype="dashed", color = "#38618C") +
+    geom_vline(xintercept=3, size = 2, linetype="dashed", color = "#38618C") +
     xlab("Number of clusters") +
     ylab("Average Silhouette Score") +
     scale_x_continuous(breaks = 1:30) +
@@ -441,15 +443,15 @@ drug_clust_boot_svd %>% pvrect(alpha=0.9, pv="au")
 #dev.off()
 
 ## colours for dendrogram branches
-clust_cols_ms1_svd <- c("#48392A", "#48392A")
+clust_cols_ms1_svd <- c("#48392A", "#48392A", "black")
 
-ac_ibd_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 2, col = clust_cols_ms1_svd) %>%
+ac_ibd_dend <- color_branches(as.dendrogram(drug_clust_svd), k = 3, col = clust_cols_ms1_svd) %>%
     set("branches_lwd", 2)
 
-k_2 <- cutree(ac_ibd_dend, k = 2, order_clusters_as_data = FALSE) 
+k_3 <- cutree(ac_ibd_dend, k = 3, order_clusters_as_data = FALSE) 
 ac_ibd_dend <- branches_attr_by_clusters(
   ac_ibd_dend,
-  clusters = k_2,
+  clusters = k_3,
   values = c(1,2),
   attr =  "lty"
 )
@@ -471,45 +473,17 @@ cor_meta_svd <- data.frame(Sample = labels(ac_ibd_dend)) %>%
 
 
 
-k_2 <- cutree(ac_ibd_dend, k = 2, order_clusters_as_data = FALSE) 
+k_3 <- cutree(ac_ibd_dend, k = 3, order_clusters_as_data = FALSE) 
 #ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("CD_inf", "CD", "UC","UC_inf"))
-ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("CD", "UC (infl.)",
-                                                        "Control", "CD (infl.)", "UC"))
-pdf(here::here("Dataset4-ibd", "ac", "ibd-dc-dend.pdf"))
+ac_ibd_dend <- ac_ibd_dend %>% set_labels(., labels = c("Control", "CD (infl.)", "CD", 
+                                                        "UC", "UC (inlf.)"))
+                                            
+
+#pdf(here::here("Dataset4-ibd", "ac", "update", "ibd-ac-dend.pdf"))
 ac_ibd_dend %>% plot()
 colored_bars(colors = cor_meta_svd %>% dplyr::select(-Sample, -overall), dend = ac_ibd_dend, sort_by_labels_order = FALSE)
-dev.off()
-
-```
-
-```{r}
-## Uncomment to save PDF of heatmap
-#pdf(here::here("ibd","figs", "ibd-ms1_heatmap.pdf"), width=9, height=6)
-# par(xpd = TRUE) # allows legend to be outside "official" plotting lines
-# coords2 <- list(x=0, y=0.95)
-# heatmap.2(moduleTraitCor_svd,
-#           notecol="black",      # change font color of cell labels to black
-#           density.info="none",  # turns off density plot inside color legend
-#           trace="none",         # turns off trace lines inside the heat map
-#           margins =c(5,0),      # widens margins around plot
-#           col=new_palette,      # 
-#           breaks=seq(-0.8,0.8,0.01),    # enable color transition at specified limits
-#           dendrogram="col",     # only draw a row dendrogram
-#           Colv=drug_dend,            # turn off column clustering
-#           Rowv=as.dendrogram(module_clust_svd),
-#           #ColSideColors = cor_meta$drug_col,
-#           ColSideColors = cor_meta_svd$drug_col,
-#           labRow = "",
-#           key.xlab ="Pearson Correlation Coefficient",
-#           key.title = NA,
-#           lhei = c(1,4),
-#           lwid= c(1,3),
-#           cexCol = 1.2,
-#           keysize = 1)
-# legend(coords2, title = "Groups",legend=c("CD-A", "UC-A", "UC-N"), 
-#        fill=c("#1446A0",  "#DB3069", "#FFBA08"), cex=0.8, box.lty=0)
-# Uncomment if you are saving to file
 #dev.off()
+
 ```
 
 # Biomarker discovery through machine learning
@@ -526,119 +500,165 @@ It's important to consider we have way more predictors than samples (p \>\> n). 
 
 Elastic net (\`glmnet\`) and lasso can be used for feature selection... (and therefore biomarker selection.)
 
-Let's show how we can use Lasso to identify for features that can identify UC with inflammation.
 
-```{r glmnet, warning=F}
+## Feature selection function
 
-## First let's focus on UC with inflammation
-library(caret)
-library(glmnet)
-library(pROC)
-clusterinfofeat <- kmedoid_labels %>% data.frame()
-cor_info <- data.frame(moduleTraitCor_svd)
-# indices for features in cluster with the LOWEST correlation to UC_Yes
-## this is because tehre are no ideal clusters with high correlation
-min_UCinfl <- which(clusterinfopep$V1 == which.min(cor_info$UC_Yes)-1)
-UCinfl_log_feat <- filt_feat[min_UCinfl]
-UCinfl_log <- log_exp[min_UCinfl,] %>%
-  mutate(feat_num = UCinfl_log_feat)
+```{r featselecfunc, warning=F}
 
+### Currently this function is specific to IBD data
+## Can definitely be changed to be appropriate for any other data.
+auto_feature_selection <- function(log_exp, kmed_labels, cond, cluster_cor, randomnumber=1234){
+  
+ # kmed_labels=kmedoid_labels
+#  cond= "CD_Yes"
+#  cluster_cor = moduleTraitCor_svd
+#  randomnumber = 1234
+  
+  
+  
+  clusterinfofeat <- kmed_labels %>% data.frame()
+  cor_info <- data.frame(cluster_cor)
 
-
-
-ibd_meta_imp <- ac_metadata %>% dplyr::select(NewName, diag_inflam) %>%
-  mutate(UCinfl = case_when(diag_inflam == "UC_Yes" ~ 1,
-                          diag_inflam != "UC_Yes" ~ 0))
-clustfeat <- UCinfl_log %>% t() %>% as.data.frame() %>%
-  rownames_to_column("NewName") %>% 
-  left_join(ibd_meta_imp, . , by="NewName") %>% dplyr::select(-NewName, -diag_inflam)
-#colnames(clustfeat) <- UCinfl_log_feat
-
-clustfeat_outcome <- clustfeat %>% dplyr::select(UCinfl) %>% as.matrix(.)
-clustfeat <- clustfeat %>% dplyr::select(-UCinfl) %>% data.matrix(.) 
-colnames(clustfeat) <- 1:ncol(clustfeat)
-setequal(clustfeat %>% colnames, UCinfl_log_feat)
-###
-## Change to different nfold
-## LASSO, leave-one-out cross validation
-
-outcome <- clustfeat_outcome[,1]
-set.seed(1234)
-clustfeatlasso <- cv.glmnet(clustfeat, outcome, family = "binomial", nfold =62 , type.measure = "auc", paralle = F, alpha = 1, keep=T)
-
-model_final <- glmnet(clustfeat, outcome, family = "binomial", lambda = clustfeatlasso$lambda.1se, alpha = 1) #lambda.1se is the most regularized model
-#coef(model1, "lambda.min")
-
-k <- dim(clustfeat)[1]
-predictions <- c()
-for (i in 1:k) {
-  model <- glmnet(clustfeat[-i,],  outcome[-i], family="binomial", lambda = clustfeatlasso$lambda.1se, alpha = 1)
-  predictions <- c(predictions, predict(model, newx=clustfeat[i,]))
-}
-UCinfl_roc <- roc(outcome, predictions)
-#pdf(here::here("Dataset4-ibd", "ac", "uc_inlf_roc.pdf"))
-plot(UCinfl_roc, col="blue", print.auc=T)
-#dev.off()
-#max(clustfeatlasso$cvm)
-#summary(clustfeatlasso$cvm)
-#rocs <- roc.glmnet(clustfeatlasso$fit.preval, newy=clustfeat_outcome$UCinfl)
-#best <- clustfeatlasso$index["min",] ## 33
-#plot(rocs[[best]], type = "l") 
-#invisible(sapply(rocs, lines, col="grey")) 
-#lines(rocs[[best]], lwd = 2,col = "red")
-
-
-`%ni%` <- Negate(`%in%`)
-c<-coef(model_final) #,  s='lambda.1se') #, x=clustfeat, y=clustfeat_outcome$UCinfl, s='lambda.min',exact=TRUE)
-inds<-which(c!=0)
-variables<-rownames(c)[inds]
-variables<-variables[variables %ni% '(Intercept)'] %>% as.numeric()
-
-
-## subset features for plotting 
-#clustfeat %>% t() and UCinlf_log are the same :)
-selected <- UCinfl_log[variables,]
-selected <- selected %>%  pivot_longer(!feat_num, names_to="Sample", values_to="log2_intensity") %>%
-  mutate(Coefficient = rep("Non-zero", nrow(.)))
-notselected <- UCinfl_log[-variables,]
-notselected <- notselected %>%  pivot_longer(!feat_num, names_to="Sample", values_to="log2_intensity") %>%
-  mutate(Coefficient = rep("Zero", nrow(.)))
-
-features <- rbind(selected, notselected)
-features <- merge(features, ibd_meta_imp, by.x="Sample", by.y="NewName") %>%
-  mutate(diag_inflam = case_when(diag_inflam=="Control_No" ~ "Control",
-                                 diag_inflam=="CD_No" ~ "CD",
-                                 diag_inflam=="CD_Yes" ~ "CD (inflam.)",
-                                 diag_inflam=="UC_No" ~ "UC",
-                                 diag_inflam=="UC_Yes" ~ "UC (inflam.)"))
-
-
-features$diag_inflam <- factor(features$diag_inflam, 
-                                       levels = c("Control", "CD", "CD (inflam.)", "UC", "UC (inflam.)"))
-meanvals <- features %>% group_by(feat_num, diag_inflam, Coefficient) %>%
-  dplyr::summarize(averageval = mean(log2_intensity, na.rm=TRUE))
-#group_spec <- meanvals %>% filter(group_inflam == x_group)
-#group_spec <- group_spec[which.max(group_spec$averageval),] #7882
-
-meanvals$Coefficient <- factor(meanvals$Coefficient, levels = c("Non-zero", "Zero"))
-
-(group_plot<- ggplot(meanvals, aes(x=diag_inflam, y=averageval,colour=Coefficient))+ #, fill=diag_inflam)) 
-     geom_point(alpha=0.5, position=position_jitterdodge()) +
-    geom_boxplot(outlier.shape=NA, alpha=0.7) + 
+  ## Highest absolute correlation to condition of choice
+  clust_pred <- which(clusterinfofeat$V1 == which.max(abs(cor_info[,cond]))-1)
+  cluster_chosen <- which.max(abs(cor_info[,cond]))-1
+  
+  ## Organizing data
+  feat_pred <- filt_feat[clust_pred] %>% as.numeric()
+  log_int <- log_exp[clust_pred,] %>% ## the rownames with the clusters
+    mutate(feat_num = feat_pred) ## the actual feature names because youll need them to extract the info
+  ## Updating the metadata to include a binary variable of choice
+  ibd_meta_imp <- ac_metadata %>% dplyr::select(NewName, diag_inflam) %>%
+  mutate(diagnosis = case_when(diag_inflam == cond ~ 1,
+                          diag_inflam != cond ~ 0))
+ 
+  ## Transposing the cluster feature for glm
+   clustfeat <- log_int %>% t() %>% as.data.frame() %>%
+    rownames_to_column("NewName") %>% 
+    left_join(ibd_meta_imp, . , by="NewName") %>% dplyr::select(-NewName, -diag_inflam)
+  # outcome for glm
+  clustfeat_outcome <- clustfeat %>% dplyr::select(diagnosis) %>% as.matrix(.)
+  # getting features ready for glm once again
+  clustfeat <- data.matrix(clustfeat[,-1])
+  colnames(clustfeat) <- 1:ncol(clustfeat) ## now they are NO LONGER the feature numbers.
+ 
+  ## LASSO, leave-one-out cross validation
+  outcome <- clustfeat_outcome[,1]
+  set.seed(randomnumber)
+  ## estimating the ideal lambda for final model 
+  clustfeatlasso <- cv.glmnet(clustfeat, outcome, family = "binomial", nfold =62 , type.measure = "auc", paralle = F, alpha = 1, keep=T)
+  
+  model_final <- glmnet(clustfeat, outcome, family = "binomial", lambda = clustfeatlasso$lambda.1se, alpha = 1) #lambda.1se is the most regularized model
+  
+ #broom::tidy(model_final)
+  
+  # calculating the predicton accuracy using L-O-O yet again
+  k <- dim(clustfeat)[1]
+  predictions <- c()
+  for (i in 1:k) {
+    model <- glmnet(clustfeat[-i,],  outcome[-i], family="binomial", lambda = clustfeatlasso$lambda.1se, alpha = 1)
+    predictions <- c(predictions, predict(model, newx=clustfeat[i,]))
+  }
+  # ROC curve for AUC calculation and visualization
+  roc_curve <- roc(outcome, predictions)
+  auc <- round(auc(outcome, predictions),4)
+  print(auc)
+  
+  ## grabbing the features with non-zero coefficients
+  `%ni%` <- Negate(`%in%`)
+  c<-coef(model_final) #,  s='lambda.1se') #, x=clustfeat, y=clustfeat_outcome$UCinfl, s='lambda.min',exact=TRUE)
+  inds<-which(c!=0)
+  variables<-rownames(c)[inds]
+  variables<-variables[variables %ni% '(Intercept)'] %>% as.numeric()
+  
+  
+  selected <- log_int[variables,]
+  selected <- selected %>%  pivot_longer(!feat_num, names_to="Sample", values_to="log2_intensity") %>%
+    mutate(Coefficient = rep("Non-zero", nrow(.)))
+  notselected <- log_int[-variables,]
+  notselected <- notselected %>%  pivot_longer(!feat_num, names_to="Sample", values_to="log2_intensity") %>%
+    mutate(Coefficient = rep("Zero", nrow(.)))
+  
+  features <- rbind(selected, notselected)
+  features <- merge(features, ibd_meta_imp, by.x="Sample", by.y="NewName") %>%
+    mutate(diag_inflam = case_when(diag_inflam=="Control_No" ~ "Control",
+                                   diag_inflam=="CD_No" ~ "CD",
+                                   diag_inflam=="CD_Yes" ~ "CD (inflam.)",
+                                   diag_inflam=="UC_No" ~ "UC",
+                                   diag_inflam=="UC_Yes" ~ "UC (inflam.)"))
+  
+  
+  features$diag_inflam <- factor(features$diag_inflam, 
+                                         levels = c("Control", "CD", "CD (inflam.)", "UC", "UC (inflam.)"))
     
-  scale_colour_manual(name = "Coefficients", values=c("Red", "grey31")) +
-#geom_line(data = group_fc_outlier, aes(x=group_inflam, y=averageval, group=1),
-#          colour = "#59C9A5") +
-#geom_point(data = group_fc_outlier, aes(x=group_inflam, y=averageval),shape = 21, fill="#59C9A5", colour = "white", size = 4) +
-ylab("Mean log2 intensity by feature") +
-xlab("Diagnosis"))
+  # summarized feature values
+  meanvals <- features %>% group_by(feat_num, diag_inflam, Coefficient) %>%
+    dplyr::summarize(averageval = mean(log2_intensity, na.rm=TRUE))
+  meanvals$Coefficient <- factor(meanvals$Coefficient, levels = c("Non-zero", "Zero"))
+  
+  #ggplot
+  (group_plot<- ggplot(meanvals, aes(x=diag_inflam, y=averageval,colour=Coefficient))+ #, fill=diag_inflam)) 
+       geom_point(alpha=0.5, position=position_jitterdodge()) +
+      geom_boxplot(outlier.shape=NA, alpha=0.7) + 
+      
+    scale_colour_manual(name = "Coefficients", values=c("Red", "grey31")) +
+  ylab("Mean log2 intensity by feature") +
+  xlab("Diagnosis"))
+  
+  selected_featnum <- selected$feat_num %>% unique()
 
-#ggsave(here::here("Dataset4-ibd", "ac", "cluster_features.pdf"), group_plot)
+  feat_rt_mz <- intensity_withcf[selected_featnum,] %>% dplyr::select(feature_num, RT, MZ)
+  
+  ## all the variables to return...
+  toreturn <- list(final_model = model_final,
+                  roc = roc_curve,
+                  auc=auc,
+                  cluster = cluster_chosen,
+                  cluster_feat = features,
+                  summarized_feat = meanvals,
+                  feat_plot = group_plot,
+                  feat_rt_mz = feat_rt_mz)
+  return(toreturn)  
+    }
 
-selected_featnum <- selected$feat_num %>% unique()
+CD_N_res <- auto_feature_selection(log_exp=log_exp, kmed_labels = kmedoid_labels, cond="CD_No",
+                       cluster_cor = moduleTraitCor_svd)
+broom::tidy(CD_N_res$final_model)
 
-feat_rt_mz <- intensity_withcf[selected_featnum,] %>% dplyr::select(feature_num, RT, MZ)
+CD_Y_res <- auto_feature_selection(log_exp=log_exp, kmed_labels = kmedoid_labels, cond="CD_Yes",
+                       cluster_cor = moduleTraitCor_svd)
+broom::tidy(CD_Y_res$final_model)
+(CD_Y_roc <- ggroc(CD_Y_res$roc, colour = 'red', size = 1) +
+  ggtitle(paste0('CD_Y; AUC = ', CD_Y_res$auc)) +
+  geom_abline(intercept=1, slope=1, linetype="dashed") +
+  theme_bw())
+CD_Y_res$feat_plot
 
+#write.csv(CD_Y_res$feat_rt_mz, here::here("Dataset4-ibd", "ac", "feat_selection", "CD_Y_mz-rt.csv"), row.names=F, quote =F)
+#ggsave(here::here("Dataset4-ibd", "ac", "feat_selection", "CD_Y_feat.pdf"),CD_Y_res$feat_plot, width=7, height=7, units="in")
+#ggsave(here::here("Dataset4-ibd", "ac", "feat_selection", "CD_Y_roc.pdf"), CD_Y_roc, width=7, height=7, units="in")
 
-#write.csv(feat_rt_mz, here::here("Dataset4-ibd", "ac", "cluster_features.csv"), row.names=F, quote =F)
+UC_N_res <- auto_feature_selection(log_exp=log_exp, kmed_labels = kmedoid_labels, cond="UC_No",
+                       cluster_cor = moduleTraitCor_svd)
+#broom::tidy(UC_N_res$final_model)
+#UC_N_res$roc
+
+UC_Y_res <- auto_feature_selection(log_exp=log_exp, kmed_labels = kmedoid_labels, cond="UC_Yes",
+                       cluster_cor = moduleTraitCor_svd)
+#broom::tidy(UC_Y_res$final_model)
+#UC_Y_res$roc
+
+Control_res <- auto_feature_selection(log_exp=log_exp, kmed_labels = kmedoid_labels, cond="Control_No",
+                       cluster_cor = moduleTraitCor_svd)
+broom::tidy(Control_res$final_model)
+(Control_roc <- ggroc(Control_res$roc, colour = 'red', size = 1) +
+  ggtitle(paste0('Control; AUC = ', Control_res$auc)) +
+  geom_abline(intercept=1, slope=1, linetype="dashed") +
+  theme_bw())
+Control_res$feat_plot
+ctrl_feat <- Control_res$feat_rt_mz
+#write.csv(Control_res$feat_rt_mz, here::here("Dataset4-ibd", "ac", "feat_selection", "Ctrl_mz-rt.csv"), row.names=F, quote =F)
+#ggsave(here::here("Dataset4-ibd", "ac", "feat_selection", "Ctrl_feat.pdf"), Control_res$feat_plot,
+#       width=7, height=7, units="in")
+#ggsave(here::here("Dataset4-ibd", "ac", "feat_selection", "Ctrl_roc.pdf"), Control_roc,width=7, height=7, units="in")
 ```
